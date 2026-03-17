@@ -145,6 +145,7 @@ class PropertyListItem(BaseModel):
     owner_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    distance_km: Optional[float] = None
 
     model_config = {"from_attributes": True}
 

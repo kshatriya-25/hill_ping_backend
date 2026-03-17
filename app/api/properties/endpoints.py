@@ -1,5 +1,6 @@
 # HillPing — Property & Room endpoints
 
+import math
 import os
 import uuid
 from typing import Optional
@@ -23,6 +24,18 @@ router = APIRouter(tags=["properties"])
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the great-circle distance between two points in kilometres."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 def _get_property_or_404(property_id: int, db: Session) -> Property:
     prop = db.query(Property).filter(Property.id == property_id).first()
     if not prop:
@@ -35,7 +48,12 @@ def _check_ownership(prop: Property, user: User):
         raise HTTPException(status_code=403, detail="You do not own this property")
 
 
-def _build_list_item(prop: Property, db: Session) -> dict:
+def _build_list_item(
+    prop: Property,
+    db: Session,
+    ref_lat: Optional[float] = None,
+    ref_lng: Optional[float] = None,
+) -> dict:
     """Build a PropertyListItem dict from a Property ORM object."""
     cover = db.query(PropertyPhoto).filter(
         PropertyPhoto.property_id == prop.id, PropertyPhoto.is_cover == True
@@ -43,6 +61,11 @@ def _build_list_item(prop: Property, db: Session) -> dict:
     min_price = db.query(func.min(Room.price_weekday)).filter(
         Room.property_id == prop.id, Room.is_available == True
     ).scalar()
+
+    distance_km = None
+    if ref_lat is not None and ref_lng is not None and prop.latitude and prop.longitude:
+        distance_km = round(_haversine_km(ref_lat, ref_lng, prop.latitude, prop.longitude), 1)
+
     return {
         "id": prop.id,
         "name": prop.name,
@@ -58,6 +81,7 @@ def _build_list_item(prop: Property, db: Session) -> dict:
         "owner_name": prop.owner.name if prop.owner else None,
         "latitude": prop.latitude,
         "longitude": prop.longitude,
+        "distance_km": distance_km,
     }
 
 
@@ -208,7 +232,10 @@ def list_properties(
     ne_lng: Optional[float] = Query(default=None, ge=-180, le=180),
     sw_lat: Optional[float] = Query(default=None, ge=-90, le=90),
     sw_lng: Optional[float] = Query(default=None, ge=-180, le=180),
-    sort_by: str = Query(default="created_at", pattern=r'^(created_at|price|rating)$'),
+    ref_lat: Optional[float] = Query(default=None, ge=-90, le=90, description="Reference latitude for distance calculation"),
+    ref_lng: Optional[float] = Query(default=None, ge=-180, le=180, description="Reference longitude for distance calculation"),
+    max_distance_km: Optional[float] = Query(default=None, gt=0, le=500, description="Max distance in km from reference point"),
+    sort_by: str = Query(default="created_at", pattern=r'^(created_at|price|rating|distance)$'),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(getdb),
@@ -242,14 +269,44 @@ def list_properties(
         matching_ids = [r.property_id for r in room_q.distinct().all()]
         q = q.filter(Property.id.in_(matching_ids))
 
+    has_ref = ref_lat is not None and ref_lng is not None
+
+    # Distance filtering & sorting require fetching all candidates first
+    if has_ref and (max_distance_km is not None or sort_by == "distance"):
+        # Only consider properties that have coordinates
+        q = q.filter(Property.latitude.isnot(None), Property.longitude.isnot(None))
+
+        if sort_by == "price":
+            q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(Room.price_weekday).asc())
+        else:
+            q = q.order_by(Property.created_at.desc())
+
+        all_props = q.all()
+
+        # Compute distance and filter
+        props_with_dist = []
+        for p in all_props:
+            dist = _haversine_km(ref_lat, ref_lng, p.latitude, p.longitude)
+            if max_distance_km is not None and dist > max_distance_km:
+                continue
+            props_with_dist.append((p, dist))
+
+        # Sort by distance if requested
+        if sort_by == "distance":
+            props_with_dist.sort(key=lambda x: x[1])
+
+        # Paginate
+        page = props_with_dist[skip : skip + limit]
+        return [_build_list_item(p, db, ref_lat, ref_lng) for p, _ in page]
+
+    # Standard sort (no distance)
     if sort_by == "price":
-        # Sort by minimum room price
         q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(Room.price_weekday).asc())
     else:
         q = q.order_by(Property.created_at.desc())
 
     properties = q.offset(skip).limit(limit).all()
-    return [_build_list_item(p, db) for p in properties]
+    return [_build_list_item(p, db, ref_lat, ref_lng) for p in properties]
 
 
 @router.get("/my", response_model=list[PropertyListItem])
