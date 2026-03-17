@@ -26,6 +26,7 @@ from app.api.payouts.endpoints import router as payouts_Router
 from app.api.reviews.endpoints import router as reviews_Router
 from app.api.coupons.endpoints import router as coupons_Router
 from app.api.notifications.endpoints import router as notifications_Router
+from app.api.wishlist.endpoints import router as wishlist_Router
 from app.api.admin.endpoints import router as admin_Router
 from app.core.config import settings
 from app.middleware.security_headers import SecurityHeadersMiddleware
@@ -63,6 +64,7 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(reviews_Router, prefix="/api/reviews")
     app.include_router(coupons_Router, prefix="/api/coupons")
     app.include_router(notifications_Router, prefix="/api/notifications")
+    app.include_router(wishlist_Router, prefix="/api/wishlist")
     app.include_router(admin_Router, prefix="/api/admin")
 
 

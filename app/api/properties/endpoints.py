@@ -47,6 +47,7 @@ def _build_list_item(prop: Property, db: Session) -> dict:
         "id": prop.id,
         "name": prop.name,
         "city": prop.city,
+        "state": prop.state,
         "property_type": prop.property_type,
         "status": prop.status,
         "is_verified": prop.is_verified,
@@ -55,6 +56,8 @@ def _build_list_item(prop: Property, db: Session) -> dict:
         "price_min": min_price,
         "rating_avg": None,  # TODO: compute from reviews
         "owner_name": prop.owner.name if prop.owner else None,
+        "latitude": prop.latitude,
+        "longitude": prop.longitude,
     }
 
 
@@ -201,6 +204,10 @@ def list_properties(
     price_min: Optional[float] = None,
     price_max: Optional[float] = None,
     guests: Optional[int] = None,
+    ne_lat: Optional[float] = Query(default=None, ge=-90, le=90),
+    ne_lng: Optional[float] = Query(default=None, ge=-180, le=180),
+    sw_lat: Optional[float] = Query(default=None, ge=-90, le=90),
+    sw_lng: Optional[float] = Query(default=None, ge=-180, le=180),
     sort_by: str = Query(default="created_at", pattern=r'^(created_at|price|rating)$'),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
@@ -213,6 +220,15 @@ def list_properties(
         q = q.filter(func.lower(Property.city) == city.lower())
     if property_type:
         q = q.filter(Property.property_type == property_type)
+
+    # Map bounds filter
+    if all(v is not None for v in [ne_lat, ne_lng, sw_lat, sw_lng]):
+        q = q.filter(
+            Property.latitude.isnot(None),
+            Property.longitude.isnot(None),
+            Property.latitude.between(sw_lat, ne_lat),
+            Property.longitude.between(sw_lng, ne_lng),
+        )
 
     # Filter by room price/capacity
     if price_min is not None or price_max is not None or guests is not None:

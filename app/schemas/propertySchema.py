@@ -134,6 +134,7 @@ class PropertyListItem(BaseModel):
     id: int
     name: str
     city: str
+    state: Optional[str] = None
     property_type: str
     status: str
     is_verified: bool
@@ -142,6 +143,8 @@ class PropertyListItem(BaseModel):
     price_min: Optional[Decimal] = None
     rating_avg: Optional[float] = None
     owner_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
