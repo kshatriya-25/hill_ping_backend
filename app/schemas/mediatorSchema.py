@@ -56,9 +56,10 @@ class MediatorProfileResponse(BaseModel):
 class BulkPingRequest(BaseModel):
     """Mediator pings up to 3 properties simultaneously."""
     property_ids: list[int] = Field(..., min_length=1, max_length=3)
-    check_in: str  # date string YYYY-MM-DD
-    check_out: str
-    guests_count: int = Field(default=1, ge=1, le=20)
+    check_in: Optional[str] = None  # date string YYYY-MM-DD, defaults to today
+    check_out: Optional[str] = None  # defaults to tomorrow
+    guests_count: Optional[int] = Field(default=1, ge=1, le=20)
+    guest_count: Optional[int] = None  # alias accepted from frontend
     guest_id: Optional[int] = None  # registered guest, if any
 
 

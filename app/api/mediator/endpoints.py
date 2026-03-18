@@ -313,14 +313,19 @@ def bulk_ping(
     Ping up to 3 properties simultaneously.
     Unlike guest pings, mediator bulk pings collect ALL responses.
     """
-    from datetime import date as date_type
+    from datetime import date as date_type, timedelta
     from ...api.ws.connection_manager import ws_manager
 
+    # Default dates: today → tomorrow
+    today = date_type.today()
     try:
-        check_in = date_type.fromisoformat(data.check_in)
-        check_out = date_type.fromisoformat(data.check_out)
+        check_in = date_type.fromisoformat(data.check_in) if data.check_in else today
+        check_out = date_type.fromisoformat(data.check_out) if data.check_out else today + timedelta(days=1)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date format. Use YYYY-MM-DD")
+
+    # Accept both guest_count and guests_count from frontend
+    guests = data.guests_count or data.guest_count or 1
 
     try:
         pings = create_bulk_ping_sessions(
@@ -328,7 +333,7 @@ def bulk_ping(
             property_ids=data.property_ids,
             check_in=check_in,
             check_out=check_out,
-            guests_count=data.guests_count,
+            guests_count=guests,
             guest_id=data.guest_id,
             db=db,
         )
@@ -385,4 +390,87 @@ def bulk_ping_status(
             "pending": sum(1 for p in pings if p.status == "pending"),
             "expired": sum(1 for p in pings if p.status == "expired"),
         },
+    }
+
+
+# ── Wallet ────────────────────────────────────────────────────────────────────
+
+@router.get("/wallet/balance")
+def wallet_balance(
+    db: Session = Depends(getdb),
+    current_user: User = Depends(require_role("mediator")),
+):
+    """Get mediator wallet balance."""
+    profile = db.query(MediatorProfile).filter(
+        MediatorProfile.user_id == current_user.id
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    return {
+        "balance": float(profile.wallet_balance),
+        "user_id": current_user.id,
+    }
+
+
+@router.get("/wallet/transactions")
+def wallet_transactions(
+    db: Session = Depends(getdb),
+    current_user: User = Depends(require_role("mediator")),
+):
+    """Get mediator wallet transaction history."""
+    from ...modals.mediator import MediatorWalletTransaction
+
+    txns = db.query(MediatorWalletTransaction).filter(
+        MediatorWalletTransaction.mediator_id == current_user.id,
+    ).order_by(MediatorWalletTransaction.created_at.desc()).limit(50).all()
+
+    return [
+        {
+            "id": t.id,
+            "type": t.type,
+            "amount": float(t.amount),
+            "balance_after": float(t.balance_after),
+            "reference": t.reference,
+            "description": t.description,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in txns
+    ]
+
+
+@router.post("/wallet/topup")
+def wallet_topup(
+    amount: float,
+    db: Session = Depends(getdb),
+    current_user: User = Depends(require_role("mediator")),
+):
+    """Top up mediator wallet (simplified — in production, integrate Razorpay)."""
+    from decimal import Decimal
+    from ...modals.mediator import MediatorWalletTransaction
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    profile = db.query(MediatorProfile).filter(
+        MediatorProfile.user_id == current_user.id
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    profile.wallet_balance += Decimal(str(amount))
+
+    txn = MediatorWalletTransaction(
+        mediator_id=current_user.id,
+        type="topup",
+        amount=Decimal(str(amount)),
+        balance_after=profile.wallet_balance,
+        description=f"Wallet top-up of ₹{amount}",
+    )
+    db.add(txn)
+    db.commit()
+
+    return {
+        "detail": f"₹{amount} added to wallet",
+        "balance": float(profile.wallet_balance),
     }

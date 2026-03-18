@@ -143,6 +143,7 @@ class PropertyListItem(BaseModel):
     price_min: Optional[Decimal] = None
     rating_avg: Optional[float] = None
     owner_name: Optional[str] = None
+    rooms_count: int = 0
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     distance_km: Optional[float] = None

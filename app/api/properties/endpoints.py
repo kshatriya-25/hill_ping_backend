@@ -61,6 +61,9 @@ def _build_list_item(
     min_price = db.query(func.min(Room.price_weekday)).filter(
         Room.property_id == prop.id, Room.is_available == True
     ).scalar()
+    rooms_count = db.query(func.count(Room.id)).filter(
+        Room.property_id == prop.id
+    ).scalar() or 0
 
     distance_km = None
     if ref_lat is not None and ref_lng is not None and prop.latitude and prop.longitude:
@@ -79,6 +82,7 @@ def _build_list_item(
         "price_min": min_price,
         "rating_avg": None,  # TODO: compute from reviews
         "owner_name": prop.owner.name if prop.owner else None,
+        "rooms_count": rooms_count,
         "latitude": prop.latitude,
         "longitude": prop.longitude,
         "distance_km": distance_km,

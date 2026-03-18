@@ -113,11 +113,18 @@ def respond_to_ping(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
     # Notify guest via WebSocket
-    background_tasks.add_task(_notify_guest_bg, ping.guest_id, {
+    prop = db.query(Property).filter(Property.id == ping.property_id).first()
+    event_data = {
         "type": f"ping_{ping.status}",
         "session_id": session_id,
         "property_id": ping.property_id,
-    })
+        "property_name": prop.name if prop else "",
+    }
+    background_tasks.add_task(_notify_guest_bg, ping.guest_id, event_data)
+
+    # V2: Also notify mediator if this was a mediator-initiated ping
+    if ping.mediator_id and ping.mediator_id != ping.guest_id:
+        background_tasks.add_task(_notify_guest_bg, ping.mediator_id, event_data)
 
     # TODO: Phase 6 — trigger payment capture on accept, release on reject
 
