@@ -92,12 +92,19 @@ async def _handle_ws_ping_response(owner_id: int, session_id: str, action: str, 
         ping = handle_ping_response(session_id, owner_id, action, db)
 
         # Notify the guest
+        from ...modals.property import Property
+        prop = db.query(Property).filter(Property.id == ping.property_id).first()
         guest_msg = {
             "type": f"ping_{ping.status}",
             "session_id": session_id,
             "property_id": ping.property_id,
+            "property_name": prop.name if prop else "",
         }
         await ws_manager.send_to_user(ping.guest_id, guest_msg)
+
+        # V2: Also notify mediator if this was a mediator-initiated ping
+        if ping.mediator_id and ping.mediator_id != ping.guest_id:
+            await ws_manager.send_to_user(ping.mediator_id, guest_msg)
 
         # Confirm to owner
         await websocket.send_json({

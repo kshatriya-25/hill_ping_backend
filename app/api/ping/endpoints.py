@@ -84,7 +84,8 @@ def check_availability(
         "check_in": str(data.check_in),
         "check_out": str(data.check_out),
         "guests_count": data.guests_count,
-        "ttl_seconds": 30,
+        "ttl_seconds": int((ping.expires_at - ping.created_at).total_seconds()),
+        "expires_at": ping.expires_at.isoformat(),
     })
 
     return ping

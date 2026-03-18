@@ -61,6 +61,7 @@ class BulkPingRequest(BaseModel):
     guests_count: Optional[int] = Field(default=1, ge=1, le=20)
     guest_count: Optional[int] = None  # alias accepted from frontend
     guest_id: Optional[int] = None  # registered guest, if any
+    ttl_seconds: Optional[int] = Field(default=None, ge=15, le=120)  # custom ping duration, default from config
 
 
 class MediatorSearchQuery(BaseModel):

@@ -46,6 +46,7 @@ def create_ping_session(
     check_out: datetime.date,
     guests_count: int,
     db: Session,
+    ttl_seconds: int | None = None,
 ) -> PingSession:
     """
     Create a new ping session:
@@ -106,7 +107,8 @@ def create_ping_session(
     # ── Create ping session ───────────────────────────────────────────────
     session_id = uuid.uuid4().hex
     now = datetime.datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=settings.PING_TTL_SECONDS)
+    effective_ttl = ttl_seconds if ttl_seconds else settings.PING_TTL_SECONDS
+    expires_at = now + timedelta(seconds=effective_ttl)
 
     ping = PingSession(
         session_id=session_id,
@@ -137,11 +139,11 @@ def create_ping_session(
         "guests_count": guests_count,
         "property_name": prop.name,
     }
-    store_ping_session(session_id, redis_data)
+    store_ping_session(session_id, redis_data, ttl=effective_ttl)
 
     logger.info(
         "Ping session %s created: guest=%d → property=%d (owner=%d), TTL=%ds",
-        session_id, guest_id, property_id, prop.owner_id, settings.PING_TTL_SECONDS,
+        session_id, guest_id, property_id, prop.owner_id, effective_ttl,
     )
 
     return ping
@@ -343,6 +345,7 @@ def create_bulk_ping_sessions(
     guests_count: int,
     guest_id: int | None,
     db: Session,
+    ttl_seconds: int | None = None,
 ) -> list[PingSession]:
     """
     Ping up to MAX_BULK_PING properties simultaneously.
@@ -372,6 +375,7 @@ def create_bulk_ping_sessions(
                 check_out=check_out,
                 guests_count=guests_count,
                 db=db,
+                ttl_seconds=ttl_seconds,
             )
             # Update mediator fields
             ping.mediator_id = mediator_id

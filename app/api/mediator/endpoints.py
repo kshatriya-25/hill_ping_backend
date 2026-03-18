@@ -336,6 +336,7 @@ def bulk_ping(
             guests_count=guests,
             guest_id=data.guest_id,
             db=db,
+            ttl_seconds=data.ttl_seconds,
         )
     except PingError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
@@ -353,6 +354,8 @@ def bulk_ping(
                 "check_out": str(ping.check_out),
                 "guests_count": ping.guests_count,
                 "is_bulk": True,
+                "ttl_seconds": int((ping.expires_at - ping.created_at).total_seconds()),
+                "expires_at": ping.expires_at.isoformat(),
             },
         )
 

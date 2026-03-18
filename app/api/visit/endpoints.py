@@ -208,6 +208,43 @@ def my_active_visits(
     return [_enrich_response(v, db) for v in visits]
 
 
+# ── Owner: Incoming visits ────────────────────────────────────────────────────
+
+@router.get("/owner-incoming")
+def owner_incoming_visits(
+    db: Session = Depends(getdb),
+    current_user: User = Depends(require_role("owner")),
+):
+    """Owner views active visit requests on their properties."""
+    from ...modals.visit import VisitRequest
+    from ...modals.property import Property
+
+    visits = db.query(VisitRequest).filter(
+        VisitRequest.owner_id == current_user.id,
+        VisitRequest.status.in_(["requested", "en_route", "arrived"]),
+    ).order_by(VisitRequest.created_at.desc()).all()
+
+    result = []
+    for v in visits:
+        prop = db.query(Property).filter(Property.id == v.property_id).first()
+        remaining = get_visit_hold_ttl(v.visit_ref)
+        result.append({
+            "visit_ref": v.visit_ref,
+            "property_id": v.property_id,
+            "property_name": prop.name if prop else None,
+            "mediator_id": v.mediator_id,
+            "guest_count": v.guest_count,
+            "eta_minutes": v.eta_minutes,
+            "status": v.status,
+            "hold_expires_at": v.hold_expires_at.isoformat() if v.hold_expires_at else None,
+            "hold_remaining_seconds": max(remaining, 0) if remaining > 0 else 0,
+            "arrived_at": v.arrived_at.isoformat() if v.arrived_at else None,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        })
+
+    return result
+
+
 # ── Owner: Release hold ──────────────────────────────────────────────────────
 
 @router.post("/{visit_ref}/release")
