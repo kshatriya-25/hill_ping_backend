@@ -81,7 +81,7 @@ def create_user(
         email=user.email,
         phone=user.phone,
         password_hash=get_hashed_password(user.password),
-        role="user",
+        role=user.role,
     )
     db.add(new_user)
     db.commit()

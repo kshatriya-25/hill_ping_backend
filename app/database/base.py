@@ -6,3 +6,9 @@ from ..modals.booking import *
 from ..modals.review import *
 from ..modals.coupon import *
 from ..modals.platform_config import *
+from ..modals.mediator import *
+from ..modals.visit import *
+from ..modals.tour import *
+from ..modals.guest_access import *
+from ..modals.trip_card import *
+from ..modals.mediator_commission import *

@@ -68,6 +68,20 @@ DEFAULTS = {
     "ping_ttl_seconds": str(settings.PING_TTL_SECONDS),
     "commission_percentage": str(settings.COMMISSION_PERCENTAGE),
     "min_booking_amount": "1",
+
+    # V2: Mediator reliability weights
+    "mediator_weight_completion": "0.35",
+    "mediator_weight_satisfaction": "0.30",
+    "mediator_weight_speed": "0.20",
+    "mediator_weight_accuracy": "0.15",
+
+    # V2: Mediator commission settings
+    "mediator_commission_tier1_flat": "50",      # ₹50 flat for bookings ≤ ₹1000
+    "mediator_commission_tier2_rate": "5",       # 5% for ₹1001-3000
+    "mediator_commission_tier3_rate": "6",       # 6% for ₹3001-10000
+    "mediator_commission_tier4_rate": "7",       # 7% for >₹10000
+    "residual_commission_rate": "1",             # 1% residual for acquired guests
+    "residual_commission_months": str(settings.RESIDUAL_COMMISSION_MONTHS),
 }
 
 # Human-readable descriptions for admin UI
@@ -87,6 +101,16 @@ DESCRIPTIONS = {
     "ping_ttl_seconds": "How many seconds the owner has to respond to a ping",
     "commission_percentage": "Platform commission percentage on each booking",
     "min_booking_amount": "Minimum booking amount in INR",
+    "mediator_weight_completion": "Weight for booking completion rate in mediator reliability (0-1)",
+    "mediator_weight_satisfaction": "Weight for guest satisfaction in mediator reliability (0-1)",
+    "mediator_weight_speed": "Weight for response speed in mediator reliability (0-1)",
+    "mediator_weight_accuracy": "Weight for booking accuracy in mediator reliability (0-1)",
+    "mediator_commission_tier1_flat": "Flat commission (₹) for bookings ≤ ₹1000",
+    "mediator_commission_tier2_rate": "Commission % for bookings ₹1001-3000",
+    "mediator_commission_tier3_rate": "Commission % for bookings ₹3001-10000",
+    "mediator_commission_tier4_rate": "Commission % for bookings > ₹10000",
+    "residual_commission_rate": "Residual commission % for acquired guests on subsequent bookings",
+    "residual_commission_months": "Months of residual commission eligibility after guest acquisition",
 }
 
 

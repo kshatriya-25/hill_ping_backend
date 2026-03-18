@@ -33,6 +33,10 @@ class PingSessionResponse(BaseModel):
     requested_amount: Optional[Decimal] = None
     status: str
     owner_response_time: Optional[float] = None
+    # V2: Mediator fields
+    mediator_id: Optional[int] = None
+    ping_type: str = "single"
+    bulk_ping_group_id: Optional[str] = None
     created_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     responded_at: Optional[datetime] = None

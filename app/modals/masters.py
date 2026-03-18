@@ -26,6 +26,9 @@ class User(Base):
     fcm_token = Column(String(500), nullable=True)
     avatar_url = Column(String(500), nullable=True)
     is_verified_owner = Column(Boolean, default=False, nullable=False)
+
+    # V2: Mediator acquisition tracking
+    acquired_by_mediator_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(
         DateTime(timezone=True),

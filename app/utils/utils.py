@@ -258,6 +258,13 @@ def require_guest(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def require_mediator(current_user: User = Depends(get_current_user)) -> User:
+    """Dependency that checks mediator role."""
+    if getattr(current_user, "role", None) != "mediator":
+        raise HTTPException(status_code=403, detail="Mediator privileges required")
+    return current_user
+
+
 def require_role(*roles: str):
     """Factory: returns a dependency that accepts any of the given roles."""
     def _checker(current_user: User = Depends(get_current_user)) -> User:

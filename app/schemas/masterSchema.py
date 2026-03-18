@@ -38,7 +38,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
-    role: str = Field(default="guest", pattern=r'^(guest|owner)$')
+    role: str = Field(default="guest", pattern=r'^(guest|owner|mediator)$')
 
     @field_validator("password")
     @classmethod

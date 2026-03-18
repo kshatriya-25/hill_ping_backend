@@ -1,6 +1,7 @@
 # HillPing — Booking endpoints
 
 import datetime
+import logging
 import uuid
 from decimal import Decimal
 
@@ -355,6 +356,22 @@ def complete_booking(
         status="pending",
     )
     db.add(payout)
+
+    # V2: Mediator commission calculation
+    if booking.mediator_id:
+        from ...services.mediator_commission import (
+            calculate_booking_commission, check_residual_commission, record_guest_acquisition,
+        )
+        from ...services.mediator_reliability import calculate_mediator_score
+
+        calculate_booking_commission(booking, booking.mediator_id, db)
+        record_guest_acquisition(booking.mediator_id, booking.guest_id, booking.id, db)
+        calculate_mediator_score(booking.mediator_id, db)
+    else:
+        # Check residual commission for acquired guests booking directly
+        from ...services.mediator_commission import check_residual_commission
+        check_residual_commission(booking, db)
+
     db.commit()
     db.refresh(booking)
     return booking
@@ -363,12 +380,21 @@ def complete_booking(
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _capture_and_confirm(booking: Booking, db: Session):
-    """Capture payment and confirm booking."""
+    """Capture payment and confirm booking. Also creates Trip Card."""
     if booking.razorpay_payment_id:
         try:
             capture_payment(booking.razorpay_payment_id, booking.total_amount)
             booking.payment_status = "captured"
             booking.status = "confirmed"
+
+            # V2: Auto-create Trip Card on booking confirmation
+            try:
+                from ...services.trip_card import create_trip_card
+                create_trip_card(booking.id, db)
+            except Exception as e:
+                logger = logging.getLogger(__name__)
+                logger.error("Failed to create trip card for booking %s: %s", booking.booking_ref, e)
+
         except Exception:
             booking.payment_status = "failed"
             booking.status = "pending"

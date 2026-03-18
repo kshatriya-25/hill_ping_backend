@@ -331,3 +331,80 @@ def _recalculate_owner_score(owner_id: int, db: Session) -> None:
 
     # Update instant confirm eligibility
     update_instant_confirm_eligibility(owner_id, db)
+
+
+# ── V2: Bulk ping for mediators ──────────────────────────────────────────────
+
+def create_bulk_ping_sessions(
+    mediator_id: int,
+    property_ids: list[int],
+    check_in: datetime.date,
+    check_out: datetime.date,
+    guests_count: int,
+    guest_id: int | None,
+    db: Session,
+) -> list[PingSession]:
+    """
+    Ping up to MAX_BULK_PING properties simultaneously.
+    Unlike guest pings (first-accept-wins), mediator bulk pings collect ALL responses.
+    """
+    if len(property_ids) > settings.MAX_BULK_PING:
+        raise PingError(f"Maximum {settings.MAX_BULK_PING} properties per bulk ping")
+    if len(property_ids) != len(set(property_ids)):
+        raise PingError("Duplicate property IDs")
+
+    # Enforce 1 ping per owner (no spamming the same owner)
+    props = db.query(Property).filter(Property.id.in_(property_ids)).all()
+    owner_ids = [p.owner_id for p in props]
+    if len(owner_ids) != len(set(owner_ids)):
+        raise PingError("Cannot bulk-ping multiple properties from the same owner")
+
+    group_id = uuid.uuid4().hex
+    pings = []
+
+    for prop_id in property_ids:
+        try:
+            ping = create_ping_session(
+                guest_id=guest_id or mediator_id,
+                property_id=prop_id,
+                room_id=None,
+                check_in=check_in,
+                check_out=check_out,
+                guests_count=guests_count,
+                db=db,
+            )
+            # Update mediator fields
+            ping.mediator_id = mediator_id
+            ping.ping_type = "bulk"
+            ping.bulk_ping_group_id = group_id
+            db.commit()
+            db.refresh(ping)
+            pings.append(ping)
+        except PingError as e:
+            logger.warning("Bulk ping skipped property %d: %s", prop_id, e.detail)
+            continue
+
+    if not pings:
+        raise PingError("No properties could be pinged")
+
+    logger.info(
+        "Bulk ping group %s created by mediator %d: %d/%d properties pinged",
+        group_id, mediator_id, len(pings), len(property_ids),
+    )
+
+    return pings
+
+
+def get_bulk_ping_status(group_id: str, db: Session) -> list[PingSession]:
+    """Get all ping sessions in a bulk ping group."""
+    pings = db.query(PingSession).filter(
+        PingSession.bulk_ping_group_id == group_id,
+    ).order_by(PingSession.created_at).all()
+
+    # Auto-expire any pending ones whose Redis keys are gone
+    for ping in pings:
+        if ping.status == "pending":
+            check_and_expire_pending(ping.session_id, db)
+            db.refresh(ping)
+
+    return pings

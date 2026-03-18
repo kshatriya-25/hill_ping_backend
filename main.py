@@ -28,6 +28,12 @@ from app.api.coupons.endpoints import router as coupons_Router
 from app.api.notifications.endpoints import router as notifications_Router
 from app.api.wishlist.endpoints import router as wishlist_Router
 from app.api.admin.endpoints import router as admin_Router
+from app.api.mediator.endpoints import router as mediator_Router
+from app.api.visit.endpoints import router as visit_Router
+from app.api.tour.endpoints import router as tour_Router
+from app.api.guest_access.endpoints import router as guest_access_Router
+from app.api.visit_card.endpoints import router as visit_card_Router
+from app.api.trip_card.endpoints import router as trip_card_Router
 from app.core.config import settings
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.logging_middleware import RequestLoggingMiddleware
@@ -66,6 +72,12 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(notifications_Router, prefix="/api/notifications")
     app.include_router(wishlist_Router, prefix="/api/wishlist")
     app.include_router(admin_Router, prefix="/api/admin")
+    app.include_router(mediator_Router, prefix="/api/mediator")
+    app.include_router(visit_Router, prefix="/api/visit")
+    app.include_router(tour_Router, prefix="/api/tour")
+    app.include_router(guest_access_Router, prefix="/api/guest-access")
+    app.include_router(visit_card_Router, prefix="/api/visit-card")
+    app.include_router(trip_card_Router, prefix="/api/trip-card")
 
 
 # ── Application factory ────────────────────────────────────────────────────────

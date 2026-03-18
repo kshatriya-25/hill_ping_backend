@@ -24,6 +24,11 @@ class PingSession(Base):
     guests_count = Column(Integer, nullable=False, default=1)
     requested_amount = Column(Numeric(10, 2), nullable=True)
 
+    # V2: Mediator bulk ping support
+    mediator_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    ping_type = Column(String(20), nullable=False, default="single")  # single, bulk
+    bulk_ping_group_id = Column(String(64), nullable=True, index=True)
+
     status = Column(String(20), nullable=False, default="pending")  # pending, accepted, rejected, expired
     owner_response_time = Column(Float, nullable=True)  # seconds taken to respond
 

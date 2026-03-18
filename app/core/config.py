@@ -81,6 +81,21 @@ class Settings:
     COMMISSION_PERCENTAGE: float = float(os.getenv("COMMISSION_PERCENTAGE", "10"))
     INSTANT_CONFIRM_THRESHOLD: float = float(os.getenv("INSTANT_CONFIRM_THRESHOLD", "95"))
 
+    # ── V2: Mediator platform settings ─────────────────────────────────────────
+    VISIT_HOLD_TTL_SECONDS: int = int(os.getenv("VISIT_HOLD_TTL_SECONDS", "2700"))  # 45 minutes
+    MAX_BULK_PING: int = int(os.getenv("MAX_BULK_PING", "3"))
+    MAX_TOUR_STOPS: int = int(os.getenv("MAX_TOUR_STOPS", "3"))
+    GUEST_ACCESS_CODE_VALIDITY_HOURS: int = int(os.getenv("GUEST_ACCESS_CODE_VALIDITY_HOURS", "24"))
+    RESIDUAL_COMMISSION_MONTHS: int = int(os.getenv("RESIDUAL_COMMISSION_MONTHS", "12"))
+
+    # ── SMS Gateway ─────────────────────────────────────────────────────────────
+    SMS_PROVIDER: str = os.getenv("SMS_PROVIDER", "")  # msg91 or twilio
+    MSG91_AUTH_KEY: str = os.getenv("MSG91_AUTH_KEY", "")
+    MSG91_SENDER_ID: str = os.getenv("MSG91_SENDER_ID", "")
+    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
+
     # ── Upload directories (extended) ─────────────────────────────────────────
     PROPERTY_PHOTO_DIR: str = os.path.join(UPLOAD_BASE_DIR, "property_photos")
 

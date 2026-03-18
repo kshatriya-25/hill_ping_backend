@@ -54,6 +54,26 @@ def dashboard_overview(
 
     active_coupons = db.query(func.count(Coupon.id)).filter(Coupon.is_active == True).scalar() or 0
 
+    # V2: Mediator stats
+    from ...modals.mediator import MediatorProfile
+    from ...modals.mediator_commission import MediatorCommission
+
+    total_mediators = db.query(func.count(User.id)).filter(User.role == "mediator").scalar() or 0
+    verified_mediators = db.query(func.count(MediatorProfile.id)).filter(
+        MediatorProfile.verification_status == "verified"
+    ).scalar() or 0
+    pending_mediators = db.query(func.count(MediatorProfile.id)).filter(
+        MediatorProfile.verification_status == "pending"
+    ).scalar() or 0
+
+    mediator_bookings = db.query(func.count(Booking.id)).filter(
+        Booking.mediator_id.isnot(None),
+    ).scalar() or 0
+
+    total_mediator_commission = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.status.in_(["pending", "approved", "paid"]),
+    ).scalar() or Decimal("0")
+
     return {
         "properties": {
             "total": total_properties,
@@ -62,6 +82,9 @@ def dashboard_overview(
         "users": {
             "owners": total_owners,
             "guests": total_guests,
+            "mediators": total_mediators,
+            "mediators_verified": verified_mediators,
+            "mediators_pending": pending_mediators,
         },
         "bookings": {
             "total": total_bookings,
@@ -78,6 +101,10 @@ def dashboard_overview(
             "avg_rating": round(float(avg_rating), 2),
         },
         "active_coupons": active_coupons,
+        "mediators": {
+            "total_mediator_bookings": mediator_bookings,
+            "total_mediator_commission": float(total_mediator_commission),
+        },
     }
 
 
@@ -187,7 +214,7 @@ def verify_property(
 @router.patch("/users/{user_id}/role")
 def change_user_role(
     user_id: int,
-    role: str = Query(..., pattern=r'^(guest|owner|admin)$'),
+    role: str = Query(..., pattern=r'^(guest|owner|mediator|admin)$'),
     db: Session = Depends(getdb),
     _admin: User = Depends(require_admin),
 ):
@@ -374,4 +401,320 @@ def reset_platform_config(
         "key": key,
         "value": DEFAULTS[key],
         "detail": f"Config '{key}' reset to default: {DEFAULTS[key]}",
+    }
+
+
+# ── V2: Mediator management ──────────────────────────────────────────────────
+
+@router.post("/mediators/create")
+def admin_create_mediator(
+    name: str = Query(...),
+    username: str = Query(...),
+    email: str = Query(...),
+    phone: str = Query(...),
+    password: str = Query(...),
+    mediator_type: str = Query(default="freelance_agent"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin creates a mediator directly (pre-verified, no KYC wait)."""
+    import secrets
+    import string
+    from ...modals.mediator import MediatorProfile
+    from ...utils.utils import get_hashed_password
+
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    new_user = User(
+        name=name,
+        username=username,
+        email=email,
+        phone=phone,
+        password_hash=get_hashed_password(password),
+        role="mediator",
+        is_active=True,
+    )
+    db.add(new_user)
+    db.flush()
+
+    chars = string.ascii_uppercase + string.digits
+    referral_code = "HP-" + "".join(secrets.choice(chars) for _ in range(8))
+    while db.query(MediatorProfile).filter(MediatorProfile.referral_code == referral_code).first():
+        referral_code = "HP-" + "".join(secrets.choice(chars) for _ in range(8))
+
+    now = datetime.datetime.now(timezone.utc)
+    profile = MediatorProfile(
+        user_id=new_user.id,
+        mediator_type=mediator_type,
+        verification_status="verified",
+        verified_at=now,
+        verified_by=_admin.id,
+        referral_code=referral_code,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(new_user)
+    db.refresh(profile)
+
+    return {
+        "detail": f"Mediator '{name}' created and pre-verified",
+        "user_id": new_user.id,
+        "username": new_user.username,
+        "referral_code": profile.referral_code,
+        "verification_status": profile.verification_status,
+    }
+
+
+@router.get("/mediators")
+def admin_list_mediators(
+    status: str = Query(default=None, description="pending, verified, rejected"),
+    mediator_type: str = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin lists all mediators with filters."""
+    from ...modals.mediator import MediatorProfile, MediatorReliabilityScore
+
+    q = db.query(MediatorProfile)
+    if status:
+        q = q.filter(MediatorProfile.verification_status == status)
+    if mediator_type:
+        q = q.filter(MediatorProfile.mediator_type == mediator_type)
+
+    total = q.count()
+    profiles = q.order_by(MediatorProfile.created_at.desc()).offset(skip).limit(limit).all()
+
+    result = []
+    for p in profiles:
+        user = db.query(User).filter(User.id == p.user_id).first()
+        score = db.query(MediatorReliabilityScore).filter(
+            MediatorReliabilityScore.mediator_id == p.user_id,
+        ).first()
+
+        result.append({
+            "id": p.id,
+            "user_id": p.user_id,
+            "name": user.name if user else None,
+            "phone": user.phone if user else None,
+            "email": user.email if user else None,
+            "mediator_type": p.mediator_type,
+            "verification_status": p.verification_status,
+            "badge_issued": p.badge_issued,
+            "wallet_balance": float(p.wallet_balance),
+            "total_bookings": p.total_bookings,
+            "total_earnings": float(p.total_earnings),
+            "acquired_guests_count": p.acquired_guests_count,
+            "referral_code": p.referral_code,
+            "reliability_score": score.total_score if score else None,
+            "score_tier": score.score_tier if score else None,
+            "is_suspended": score.is_suspended if score else False,
+            "created_at": p.created_at,
+        })
+
+    return {"total": total, "mediators": result}
+
+
+@router.post("/mediators/{user_id}/verify")
+def verify_mediator(
+    user_id: int,
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin approves a mediator's KYC."""
+    from ...modals.mediator import MediatorProfile
+
+    profile = db.query(MediatorProfile).filter(MediatorProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    profile.verification_status = "verified"
+    profile.verified_at = datetime.datetime.now(timezone.utc)
+    profile.verified_by = _admin.id
+    db.commit()
+
+    return {"detail": f"Mediator {user_id} verified"}
+
+
+@router.post("/mediators/{user_id}/reject")
+def reject_mediator(
+    user_id: int,
+    reason: str = Query(..., min_length=1),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin rejects a mediator with reason."""
+    from ...modals.mediator import MediatorProfile
+
+    profile = db.query(MediatorProfile).filter(MediatorProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    profile.verification_status = "rejected"
+    profile.verification_note = reason
+    db.commit()
+
+    return {"detail": f"Mediator {user_id} rejected", "reason": reason}
+
+
+@router.post("/mediators/{user_id}/suspend")
+def suspend_mediator(
+    user_id: int,
+    days: int = Query(default=7, ge=1, le=90),
+    reason: str = Query(default="Manual admin suspension"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin manually suspends a mediator."""
+    from ...modals.mediator import MediatorReliabilityScore, MediatorPenalty
+
+    now = datetime.datetime.now(timezone.utc)
+    suspended_until = now + datetime.timedelta(days=days)
+
+    score = db.query(MediatorReliabilityScore).filter(
+        MediatorReliabilityScore.mediator_id == user_id,
+    ).first()
+    if score:
+        score.is_suspended = True
+        score.suspended_until = suspended_until
+
+    penalty = MediatorPenalty(
+        mediator_id=user_id,
+        penalty_type="suspension",
+        reason=f"{reason} ({days} days)",
+        expires_at=suspended_until,
+    )
+    db.add(penalty)
+    db.commit()
+
+    return {"detail": f"Mediator {user_id} suspended for {days} days"}
+
+
+@router.post("/mediators/{user_id}/unsuspend")
+def unsuspend_mediator(
+    user_id: int,
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin lifts a mediator suspension."""
+    from ...modals.mediator import MediatorReliabilityScore, MediatorPenalty
+
+    score = db.query(MediatorReliabilityScore).filter(
+        MediatorReliabilityScore.mediator_id == user_id,
+    ).first()
+    if score:
+        score.is_suspended = False
+        score.suspended_until = None
+
+    db.query(MediatorPenalty).filter(
+        MediatorPenalty.mediator_id == user_id,
+        MediatorPenalty.penalty_type == "suspension",
+        MediatorPenalty.is_active == True,
+    ).update({"is_active": False}, synchronize_session="fetch")
+
+    db.commit()
+    return {"detail": f"Mediator {user_id} unsuspended"}
+
+
+@router.get("/mediators/{user_id}/stats")
+def mediator_stats(
+    user_id: int,
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Detailed mediator stats for admin."""
+    from ...modals.mediator import MediatorProfile, MediatorReliabilityScore
+    from ...modals.mediator_commission import MediatorCommission, GuestAcquisition
+
+    profile = db.query(MediatorProfile).filter(MediatorProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    score = db.query(MediatorReliabilityScore).filter(
+        MediatorReliabilityScore.mediator_id == user_id,
+    ).first()
+
+    total_commission = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.mediator_id == user_id,
+        MediatorCommission.status.in_(["pending", "approved", "paid"]),
+    ).scalar() or Decimal("0")
+
+    paid_commission = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.mediator_id == user_id,
+        MediatorCommission.status == "paid",
+    ).scalar() or Decimal("0")
+
+    acquired_guests = db.query(func.count(GuestAcquisition.id)).filter(
+        GuestAcquisition.mediator_id == user_id,
+    ).scalar() or 0
+
+    total_bookings = db.query(func.count(Booking.id)).filter(
+        Booking.mediator_id == user_id,
+    ).scalar() or 0
+
+    return {
+        "user_id": user_id,
+        "mediator_type": profile.mediator_type,
+        "verification_status": profile.verification_status,
+        "wallet_balance": float(profile.wallet_balance),
+        "total_bookings": total_bookings,
+        "commission": {
+            "total_earned": float(total_commission),
+            "total_paid": float(paid_commission),
+            "pending": float(total_commission - paid_commission),
+        },
+        "acquired_guests": acquired_guests,
+        "reliability": {
+            "total_score": score.total_score if score else None,
+            "tier": score.score_tier if score else None,
+            "completion_rate": score.completion_rate if score else None,
+            "guest_satisfaction": score.guest_satisfaction if score else None,
+            "response_speed": score.response_speed if score else None,
+            "accuracy": score.accuracy if score else None,
+            "is_suspended": score.is_suspended if score else False,
+        } if score else None,
+    }
+
+
+@router.get("/mediators/commission-report")
+def mediator_commission_report(
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Aggregate mediator commission report."""
+    from ...modals.mediator_commission import MediatorCommission
+
+    total_commissions = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.status.in_(["pending", "approved", "paid"]),
+    ).scalar() or Decimal("0")
+
+    pending = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.status == "pending",
+    ).scalar() or Decimal("0")
+
+    paid = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+        MediatorCommission.status == "paid",
+    ).scalar() or Decimal("0")
+
+    by_type = {}
+    for ctype in ["booking", "residual", "bonus", "referral"]:
+        amt = db.query(func.sum(MediatorCommission.commission_amount)).filter(
+            MediatorCommission.commission_type == ctype,
+        ).scalar() or Decimal("0")
+        by_type[ctype] = float(amt)
+
+    active_mediators = db.query(func.count(func.distinct(MediatorCommission.mediator_id))).filter(
+        MediatorCommission.status.in_(["pending", "approved", "paid"]),
+    ).scalar() or 0
+
+    return {
+        "total_commissions": float(total_commissions),
+        "pending": float(pending),
+        "paid": float(paid),
+        "by_type": by_type,
+        "active_mediators": active_mediators,
     }

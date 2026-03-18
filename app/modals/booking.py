@@ -20,6 +20,11 @@ class Booking(Base):
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     ping_session_id = Column(Integer, ForeignKey("ping_sessions.id", ondelete="SET NULL"), nullable=True)
 
+    # V2: Mediator-facilitated bookings
+    mediator_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    payment_mode = Column(String(30), nullable=False, default="online")  # online, pay_at_property, mediator_advance
+    visit_request_id = Column(Integer, nullable=True)  # FK to visit_requests added in Phase 2 migration
+
     check_in = Column(Date, nullable=False)
     check_out = Column(Date, nullable=False)
     guests_count = Column(Integer, nullable=False, default=1)
@@ -62,6 +67,7 @@ class Booking(Base):
     guest = relationship("User", foreign_keys=[guest_id])
     owner = relationship("User", foreign_keys=[owner_id])
     ping_session = relationship("PingSession")
+    mediator = relationship("User", foreign_keys=[mediator_id])
 
     __table_args__ = (
         Index("ix_bookings_guest_status", "guest_id", "status"),
