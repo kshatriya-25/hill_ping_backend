@@ -24,15 +24,29 @@ router = APIRouter(tags=["ping"])
 
 
 def _notify_owner_bg(owner_id: int, ping_data: dict):
-    """Background task: send WebSocket notification to owner."""
+    """Background task: send WebSocket + FCM push notification to owner."""
+    # 1. Try WebSocket (real-time, for foreground app)
     loop = asyncio.new_event_loop()
     try:
-        sent = loop.run_until_complete(ws_manager.send_to_user(owner_id, ping_data))
-        if not sent:
-            # TODO: Phase 9 — FCM push notification fallback
-            pass
+        loop.run_until_complete(ws_manager.send_to_user(owner_id, ping_data))
     finally:
         loop.close()
+
+    # 2. Always send FCM push (for background/closed app — Android handles dedup)
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.info("FCM: Sending push notification to owner %d", owner_id)
+    try:
+        from ...services.notifications import send_ping_notification
+        from ...database.session import SessionLocal
+        db = SessionLocal()
+        try:
+            result = send_ping_notification(owner_id, ping_data, db)
+            _logger.info("FCM: send_ping_notification returned %s", result)
+        finally:
+            db.close()
+    except Exception as e:
+        _logger.error("FCM push failed: %s", e, exc_info=True)
 
 
 def _notify_guest_bg(guest_id: int, event_data: dict):

@@ -63,16 +63,23 @@ def send_push_to_user(
     try:
         from firebase_admin import messaging
 
+        # Send DATA-ONLY message (no 'notification' field) so onMessageReceived
+        # ALWAYS fires — even when app is in background/killed.
+        # The Android app handles displaying the notification itself.
+        payload = {
+            "title": title,
+            "body": body,
+            **(data or {}),
+        }
+        # Ensure all values are strings (FCM data payload requirement)
+        payload = {k: str(v) for k, v in payload.items()}
+
         message = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            data=data or {},
+            data=payload,
             token=user.fcm_token,
             android=messaging.AndroidConfig(
                 priority="high",
-                notification=messaging.AndroidNotification(
-                    sound="default",
-                    channel_id="hillping_bookings",
-                ),
+                ttl=30,  # 30 seconds — ping urgency
             ),
         )
         response = messaging.send(message)
@@ -102,6 +109,11 @@ def send_ping_notification(owner_id: int, ping_data: dict, db: Session) -> bool:
             "type": "ping_received",
             "session_id": str(ping_data.get("session_id", "")),
             "property_id": str(ping_data.get("property_id", "")),
+            "property_name": str(property_name),
+            "check_in": str(check_in),
+            "check_out": str(ping_data.get("check_out", "")),
+            "guests_count": str(guests),
+            "ttl_seconds": str(ping_data.get("ttl_seconds", 30)),
         },
         db=db,
     )

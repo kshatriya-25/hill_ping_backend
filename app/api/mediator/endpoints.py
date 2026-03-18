@@ -13,6 +13,7 @@ from slowapi.util import get_remote_address
 from ...core.config import settings
 from ...database.session import getdb
 from ...modals.masters import User
+from ...modals.property import Property
 from ...modals.mediator import MediatorProfile
 from ...schemas.mediatorSchema import (
     MediatorRegister,
@@ -341,23 +342,36 @@ def bulk_ping(
     except PingError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
-    # Notify all owners via WebSocket
+    # Notify all owners via WebSocket + FCM push
+    from ...services.notifications import send_ping_notification
+    from ...database.session import SessionLocal
     for ping in pings:
-        background_tasks.add_task(
-            ws_manager.send_to_user,
-            ping.owner_id,
-            {
-                "type": "ping_received",
-                "session_id": ping.session_id,
-                "property_id": ping.property_id,
-                "check_in": str(ping.check_in),
-                "check_out": str(ping.check_out),
-                "guests_count": ping.guests_count,
-                "is_bulk": True,
-                "ttl_seconds": int((ping.expires_at - ping.created_at).total_seconds()),
-                "expires_at": ping.expires_at.isoformat(),
-            },
-        )
+        prop = db.query(Property).filter(Property.id == ping.property_id).first()
+        ping_data = {
+            "type": "ping_received",
+            "session_id": ping.session_id,
+            "property_id": ping.property_id,
+            "property_name": prop.name if prop else "",
+            "check_in": str(ping.check_in),
+            "check_out": str(ping.check_out),
+            "guests_count": ping.guests_count,
+            "is_bulk": True,
+            "ttl_seconds": int((ping.expires_at - ping.created_at).total_seconds()),
+            "expires_at": ping.expires_at.isoformat(),
+        }
+        background_tasks.add_task(ws_manager.send_to_user, ping.owner_id, ping_data)
+        # FCM push — use fresh DB session since request session closes after response
+        def _send_fcm(owner_id=ping.owner_id, data=ping_data):
+            fcm_db = SessionLocal()
+            try:
+                logger.info("FCM: Sending push to owner %d", owner_id)
+                result = send_ping_notification(owner_id, data, fcm_db)
+                logger.info("FCM: send_ping_notification returned %s", result)
+            except Exception as e:
+                logger.error("FCM push failed: %s", e, exc_info=True)
+            finally:
+                fcm_db.close()
+        background_tasks.add_task(_send_fcm)
 
     group_id = pings[0].bulk_ping_group_id if pings else None
 
