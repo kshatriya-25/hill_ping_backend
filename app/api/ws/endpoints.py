@@ -77,10 +77,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await _handle_ws_ping_response(user_id, session_id, action, websocket)
 
     except WebSocketDisconnect:
-        ws_manager.disconnect(user_id)
+        ws_manager.disconnect(user_id, websocket)
     except Exception as e:
         logger.exception("WebSocket error for user %d: %s", user_id, e)
-        ws_manager.disconnect(user_id)
+        ws_manager.disconnect(user_id, websocket)
 
 
 async def _handle_ws_ping_response(owner_id: int, session_id: str, action: str, websocket: WebSocket):
@@ -105,6 +105,13 @@ async def _handle_ws_ping_response(owner_id: int, session_id: str, action: str, 
         # V2: Also notify mediator if this was a mediator-initiated ping
         if ping.mediator_id and ping.mediator_id != ping.guest_id:
             await ws_manager.send_to_user(ping.mediator_id, guest_msg)
+
+        # Notify admins when a mediator-initiated ping is accepted
+        if ping.mediator_id and ping.status == "accepted":
+            from ..ping.endpoints import _notify_admins_bg
+            import asyncio
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, _notify_admins_bg, ping.id)
 
         # Confirm to owner
         await websocket.send_json({

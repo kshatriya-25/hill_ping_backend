@@ -1,13 +1,15 @@
 # HillPing — Ping (availability check) endpoints
 
 import asyncio
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from ...database.session import getdb
+from ...database.session import getdb, SessionLocal
 from ...database.redis import get_ping_ttl
 from ...modals.masters import User
 from ...modals.property import Property
+from ...modals.ping import PingSession as PingSessionModel
 from ...schemas.pingSchema import PingRequest, PingResponse, PingSessionResponse, PingStatusResponse
 from ...services.ping import (
     create_ping_session,
@@ -21,6 +23,7 @@ from ...utils.utils import get_current_user, require_guest, require_owner
 from ..ws.connection_manager import ws_manager
 
 router = APIRouter(tags=["ping"])
+_logger = logging.getLogger(__name__)
 
 
 def _notify_owner_bg(owner_id: int, ping_data: dict):
@@ -33,12 +36,9 @@ def _notify_owner_bg(owner_id: int, ping_data: dict):
         loop.close()
 
     # 2. Always send FCM push (for background/closed app — Android handles dedup)
-    import logging
-    _logger = logging.getLogger(__name__)
     _logger.info("FCM: Sending push notification to owner %d", owner_id)
     try:
         from ...services.notifications import send_ping_notification
-        from ...database.session import SessionLocal
         db = SessionLocal()
         try:
             result = send_ping_notification(owner_id, ping_data, db)
@@ -56,6 +56,94 @@ def _notify_guest_bg(guest_id: int, event_data: dict):
         loop.run_until_complete(ws_manager.send_to_user(guest_id, event_data))
     finally:
         loop.close()
+
+
+def _notify_admins_bg(ping_id: int):
+    """
+    Background task: notify all admin users when a mediator-initiated ping is accepted.
+    Sends property, mediator, guest details (including phone numbers) via WebSocket + FCM.
+    """
+    db = SessionLocal()
+    try:
+        ping = db.query(PingSessionModel).filter(PingSessionModel.id == ping_id).first()
+        if not ping or not ping.mediator_id or ping.status != "accepted":
+            return
+
+        # Gather details
+        prop = db.query(Property).filter(Property.id == ping.property_id).first()
+        guest = db.query(User).filter(User.id == ping.guest_id).first()
+        mediator = db.query(User).filter(User.id == ping.mediator_id).first()
+        owner = db.query(User).filter(User.id == ping.owner_id).first()
+
+        admin_msg = {
+            "type": "mediator_ping_accepted",
+            "session_id": ping.session_id,
+            "property_id": ping.property_id,
+            "property_name": prop.name if prop else "",
+            "property_location": prop.city if prop else "",
+            "owner_id": ping.owner_id,
+            "owner_name": owner.name if owner else "",
+            "owner_phone": owner.phone if owner else "",
+            "mediator_id": ping.mediator_id,
+            "mediator_name": mediator.name if mediator else "",
+            "mediator_phone": mediator.phone if mediator else "",
+            "guest_id": ping.guest_id,
+            "guest_name": guest.name if guest else "",
+            "guest_phone": guest.phone if guest else "",
+            "check_in": str(ping.check_in),
+            "check_out": str(ping.check_out),
+            "guests_count": ping.guests_count,
+            "response_time_seconds": ping.owner_response_time,
+        }
+
+        # Find all admin users
+        admins = db.query(User).filter(User.role == "admin", User.is_active == True).all()
+        if not admins:
+            _logger.debug("No active admins to notify")
+            return
+
+        # Send WebSocket to all admins
+        loop = asyncio.new_event_loop()
+        try:
+            for admin in admins:
+                loop.run_until_complete(ws_manager.send_to_user(admin.id, admin_msg))
+        finally:
+            loop.close()
+
+        # Send FCM push to all admins
+        from ...services.notifications import send_push_to_user
+        guest_name = guest.name if guest else "Guest"
+        mediator_name = mediator.name if mediator else "Mediator"
+        prop_name = prop.name if prop else "a property"
+
+        for admin in admins:
+            send_push_to_user(
+                user_id=admin.id,
+                title="Mediator Booking Match!",
+                body=(
+                    f"{mediator_name} matched {guest_name} ({guest.phone if guest else 'N/A'}) "
+                    f"with {prop_name}. Check-in: {ping.check_in}"
+                ),
+                data={
+                    "type": "mediator_ping_accepted",
+                    "session_id": ping.session_id,
+                    "property_id": str(ping.property_id),
+                    "mediator_id": str(ping.mediator_id),
+                    "mediator_phone": mediator.phone if mediator else "",
+                    "guest_id": str(ping.guest_id),
+                    "guest_phone": guest.phone if guest else "",
+                },
+                db=db,
+            )
+
+        _logger.info(
+            "Admin notification sent for mediator ping %s: %d admins notified",
+            ping.session_id, len(admins),
+        )
+    except Exception as e:
+        _logger.error("Admin notification failed for ping %d: %s", ping_id, e, exc_info=True)
+    finally:
+        db.close()
 
 
 @router.post("/check-availability", response_model=PingSessionResponse)
@@ -140,6 +228,10 @@ def respond_to_ping(
     # V2: Also notify mediator if this was a mediator-initiated ping
     if ping.mediator_id and ping.mediator_id != ping.guest_id:
         background_tasks.add_task(_notify_guest_bg, ping.mediator_id, event_data)
+
+    # Notify admins when a mediator-initiated ping is accepted
+    if ping.mediator_id and ping.status == "accepted":
+        background_tasks.add_task(_notify_admins_bg, ping.id)
 
     # TODO: Phase 6 — trigger payment capture on accept, release on reject
 

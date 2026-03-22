@@ -43,8 +43,8 @@ def send_push_to_user(
     db: Optional[Session] = None,
 ) -> bool:
     """
-    Send a push notification to a user via FCM.
-    Returns True if sent successfully.
+    Send a push notification to ALL registered devices for a user via FCM.
+    Returns True if sent to at least one device successfully.
     """
     _init_firebase()
 
@@ -55,43 +55,64 @@ def send_push_to_user(
     if db is None:
         return False
 
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.fcm_token:
-        logger.debug("No FCM token for user %d", user_id)
-        return False
+    from ..modals.masters import DeviceToken
+
+    tokens = db.query(DeviceToken).filter(DeviceToken.user_id == user_id).all()
+
+    # Fallback to legacy single token if no device_tokens rows yet
+    if not tokens:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.fcm_token:
+            logger.debug("No FCM token for user %d", user_id)
+            return False
+        # Wrap legacy token for uniform handling
+        class _LegacyToken:
+            def __init__(self, token):
+                self.fcm_token = token
+                self.id = None
+        tokens = [_LegacyToken(user.fcm_token)]
 
     try:
         from firebase_admin import messaging
 
-        # Send DATA-ONLY message (no 'notification' field) so onMessageReceived
-        # ALWAYS fires — even when app is in background/killed.
-        # The Android app handles displaying the notification itself.
         payload = {
             "title": title,
             "body": body,
             **(data or {}),
         }
-        # Ensure all values are strings (FCM data payload requirement)
         payload = {k: str(v) for k, v in payload.items()}
 
-        message = messaging.Message(
-            data=payload,
-            token=user.fcm_token,
-            android=messaging.AndroidConfig(
-                priority="high",
-                ttl=30,  # 30 seconds — ping urgency
-            ),
-        )
-        response = messaging.send(message)
-        logger.info("FCM sent to user %d: %s", user_id, response)
-        return True
+        any_sent = False
+        stale_ids: list[int] = []
+
+        for device in tokens:
+            try:
+                message = messaging.Message(
+                    data=payload,
+                    token=device.fcm_token,
+                    android=messaging.AndroidConfig(
+                        priority="high",
+                        ttl=30,
+                    ),
+                )
+                response = messaging.send(message)
+                logger.info("FCM sent to user %d device %s: %s", user_id, device.fcm_token[:20], response)
+                any_sent = True
+            except Exception as e:
+                logger.error("FCM send failed for user %d token %s: %s", user_id, device.fcm_token[:20], e)
+                if "UNREGISTERED" in str(e) or "INVALID_ARGUMENT" in str(e):
+                    if device.id is not None:
+                        stale_ids.append(device.id)
+
+        # Clean up invalid tokens
+        if stale_ids:
+            db.query(DeviceToken).filter(DeviceToken.id.in_(stale_ids)).delete(synchronize_session=False)
+            db.commit()
+
+        return any_sent
 
     except Exception as e:
         logger.error("FCM send failed for user %d: %s", user_id, e)
-        # Clear invalid token
-        if "UNREGISTERED" in str(e) or "INVALID_ARGUMENT" in str(e):
-            user.fcm_token = None
-            db.commit()
         return False
 
 
