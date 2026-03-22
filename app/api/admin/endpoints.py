@@ -680,6 +680,100 @@ def mediator_stats(
     }
 
 
+@router.get("/matches")
+def admin_mediator_matches(
+    date_from: str = Query(default=None, description="Filter from date (YYYY-MM-DD)"),
+    date_to: str = Query(default=None, description="Filter to date (YYYY-MM-DD)"),
+    mediator_name: str = Query(default=None, description="Filter by mediator name (partial match)"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Admin views all mediator-initiated pings that were accepted.
+    Supports date range and mediator name filters.
+    Returns full details: property, mediator, guest, owner — with phone numbers.
+    """
+    base_q = (
+        db.query(PingSession)
+        .filter(
+            PingSession.mediator_id.isnot(None),
+            PingSession.status == "accepted",
+        )
+    )
+
+    # Date filters
+    if date_from:
+        try:
+            from_dt = datetime.datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            base_q = base_q.filter(PingSession.responded_at >= from_dt)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            to_dt = datetime.datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + datetime.timedelta(days=1)
+            base_q = base_q.filter(PingSession.responded_at < to_dt)
+        except ValueError:
+            pass
+
+    # Mediator name filter (join with User)
+    if mediator_name:
+        mediator_ids = [
+            u.id for u in db.query(User).filter(
+                User.role == "mediator",
+                User.name.ilike(f"%{mediator_name}%")
+            ).all()
+        ]
+        if mediator_ids:
+            base_q = base_q.filter(PingSession.mediator_id.in_(mediator_ids))
+        else:
+            return {"total": 0, "matches": [], "has_more": False}
+
+    total = base_q.count()
+
+    pings = (
+        base_q
+        .order_by(PingSession.responded_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+    for p in pings:
+        prop = db.query(Property).filter(Property.id == p.property_id).first()
+        guest = db.query(User).filter(User.id == p.guest_id).first()
+        mediator = db.query(User).filter(User.id == p.mediator_id).first()
+        owner = db.query(User).filter(User.id == p.owner_id).first()
+
+        result.append({
+            "id": p.id,
+            "session_id": p.session_id,
+            "property_id": p.property_id,
+            "property_name": prop.name if prop else None,
+            "property_city": prop.city if prop else None,
+            "owner_id": p.owner_id,
+            "owner_name": owner.name if owner else None,
+            "owner_phone": owner.phone if owner else None,
+            "mediator_id": p.mediator_id,
+            "mediator_name": mediator.name if mediator else None,
+            "mediator_phone": mediator.phone if mediator else None,
+            "guest_id": p.guest_id,
+            "guest_name": guest.name if guest else None,
+            "guest_phone": guest.phone if guest else None,
+            "check_in": str(p.check_in),
+            "check_out": str(p.check_out),
+            "guests_count": p.guests_count,
+            "ping_type": p.ping_type,
+            "response_time_seconds": p.owner_response_time,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "responded_at": p.responded_at.isoformat() if p.responded_at else None,
+        })
+
+    return {"total": total, "matches": result, "has_more": (skip + limit) < total}
+
+
 @router.get("/mediators/commission-report")
 def mediator_commission_report(
     db: Session = Depends(getdb),
