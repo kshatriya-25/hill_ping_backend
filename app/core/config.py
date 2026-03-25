@@ -1,6 +1,7 @@
 # OM VIGHNHARTAYE NAMO NAMAH :
 
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -40,7 +41,7 @@ class Settings:
     DB_HOST: str = os.getenv("DB_HOST", "localhost")
     DB_PORT: str = os.getenv("DB_PORT", "5432")
     DB_NAME: str = os.getenv("DB_NAME", "")
-    DATABASE_URL: str = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    DATABASE_URL: str = f"postgresql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
     # ── JWT ────────────────────────────────────────────────────────────────────
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
