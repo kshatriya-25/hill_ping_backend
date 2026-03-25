@@ -1,0 +1,2 @@
+systemctl status hillpingapi
+systemctl restart hillpingapi
