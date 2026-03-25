@@ -336,31 +336,276 @@ def admin_list_bookings(
     db: Session = Depends(getdb),
     _admin: User = Depends(require_admin),
 ):
-    """Admin lists all bookings."""
+    """Admin lists all bookings with mediator & commission info."""
+    from ...modals.mediator_commission import MediatorCommission
+
     q = db.query(Booking)
     if status:
         q = q.filter(Booking.status == status)
     total = q.count()
     bookings = q.order_by(Booking.created_at.desc()).offset(skip).limit(limit).all()
 
+    result = []
+    for b in bookings:
+        # Mediator info
+        mediator = db.query(User).filter(User.id == b.mediator_id).first() if b.mediator_id else None
+        guest = db.query(User).filter(User.id == b.guest_id).first()
+        prop = db.query(Property).filter(Property.id == b.property_id).first()
+
+        # Commission status for this booking
+        commission = db.query(MediatorCommission).filter(
+            MediatorCommission.booking_id == b.id,
+            MediatorCommission.commission_type == "booking",
+        ).first() if b.mediator_id else None
+
+        # Owner payout status
+        payout = db.query(Payout).filter(Payout.booking_id == b.id).first()
+
+        result.append({
+            "id": b.id,
+            "booking_ref": b.booking_ref,
+            "property_id": b.property_id,
+            "property_name": prop.name if prop else None,
+            "guest_id": b.guest_id,
+            "guest_name": guest.name if guest else None,
+            "guest_phone": guest.phone if guest else None,
+            "owner_id": b.owner_id,
+            "mediator_id": b.mediator_id,
+            "mediator_name": mediator.name if mediator else None,
+            "mediator_phone": mediator.phone if mediator else None,
+            "check_in": str(b.check_in),
+            "check_out": str(b.check_out),
+            "total_amount": float(b.total_amount),
+            "status": b.status,
+            "payment_status": b.payment_status,
+            "payment_mode": b.payment_mode,
+            "commission": {
+                "id": commission.id,
+                "amount": float(commission.commission_amount),
+                "rate": commission.commission_rate,
+                "status": commission.status,
+            } if commission else None,
+            "owner_payout": {
+                "id": payout.id,
+                "gross": float(payout.gross_amount),
+                "commission": float(payout.commission_amount),
+                "net": float(payout.net_amount),
+                "status": payout.status,
+            } if payout else None,
+            "created_at": b.created_at,
+        })
+
+    return {"total": total, "bookings": result}
+
+
+@router.post("/bookings/{booking_id}/credit-commission")
+def credit_commission(
+    booking_id: int,
+    amount: float = Query(None, ge=0, description="Custom amount (null = use calculated)"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Admin credits commission to mediator for a confirmed booking.
+    Creates commission record if none exists, or approves existing pending one.
+    """
+    from ...modals.mediator_commission import MediatorCommission
+    from ...modals.mediator import MediatorProfile
+
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if not booking.mediator_id:
+        raise HTTPException(status_code=400, detail="This booking has no mediator")
+
+    # Check for existing commission
+    existing = db.query(MediatorCommission).filter(
+        MediatorCommission.booking_id == booking_id,
+        MediatorCommission.commission_type == "booking",
+    ).first()
+
+    if existing and existing.status in ("approved", "paid"):
+        raise HTTPException(status_code=400, detail=f"Commission already {existing.status}")
+
+    if existing:
+        # Update amount if custom, then approve
+        if amount is not None:
+            existing.commission_amount = Decimal(str(amount))
+        existing.status = "approved"
+        existing.payout_date = datetime.datetime.now(timezone.utc)
+        commission_amount = float(existing.commission_amount)
+    else:
+        # Create new commission record
+        if amount is not None:
+            commission_amount = amount
+            rate = round(amount / max(float(booking.total_amount), 1) * 100, 2)
+        else:
+            # Use tiered calculation
+            from ...services.mediator_commission import calculate_booking_commission
+            new_commission = calculate_booking_commission(booking, booking.mediator_id, db)
+            if new_commission:
+                new_commission.status = "approved"
+                new_commission.payout_date = datetime.datetime.now(timezone.utc)
+                commission_amount = float(new_commission.commission_amount)
+                db.commit()
+                # Update mediator profile earnings
+                profile = db.query(MediatorProfile).filter(
+                    MediatorProfile.user_id == booking.mediator_id
+                ).first()
+                if profile:
+                    profile.total_earnings += new_commission.commission_amount
+                    profile.wallet_balance += new_commission.commission_amount
+                    profile.total_bookings += 1
+                    db.commit()
+                return {
+                    "detail": f"Commission ₹{commission_amount} credited to mediator",
+                    "commission_amount": commission_amount,
+                    "status": "approved",
+                }
+            raise HTTPException(status_code=500, detail="Failed to calculate commission")
+
+        existing_obj = MediatorCommission(
+            mediator_id=booking.mediator_id,
+            booking_id=booking_id,
+            guest_id=booking.guest_id,
+            commission_type="booking",
+            booking_amount=booking.total_amount,
+            commission_rate=rate,
+            commission_amount=Decimal(str(commission_amount)),
+            status="approved",
+            payout_date=datetime.datetime.now(timezone.utc),
+        )
+        db.add(existing_obj)
+
+    # Update mediator profile earnings
+    profile = db.query(MediatorProfile).filter(
+        MediatorProfile.user_id == booking.mediator_id
+    ).first()
+    if profile:
+        profile.total_earnings += Decimal(str(commission_amount))
+        profile.wallet_balance += Decimal(str(commission_amount))
+        profile.total_bookings += 1
+
+    db.commit()
+
+    # Send push notification to mediator
+    from ...services.notifications import send_push_to_user
+    prop = db.query(Property).filter(Property.id == booking.property_id).first()
+    send_push_to_user(
+        user_id=booking.mediator_id,
+        title="Commission Credited!",
+        body=f"₹{commission_amount} earned for booking at {prop.name if prop else 'a property'}",
+        data={
+            "type": "earnings_credited",
+            "amount": str(commission_amount),
+            "booking_id": str(booking_id),
+            "property_name": prop.name if prop else "",
+        },
+        db=db,
+    )
+
     return {
-        "total": total,
-        "bookings": [
-            {
-                "id": b.id,
-                "booking_ref": b.booking_ref,
-                "property_id": b.property_id,
-                "guest_id": b.guest_id,
-                "owner_id": b.owner_id,
-                "check_in": str(b.check_in),
-                "check_out": str(b.check_out),
-                "total_amount": float(b.total_amount),
-                "status": b.status,
-                "payment_status": b.payment_status,
-                "created_at": b.created_at,
-            }
-            for b in bookings
-        ],
+        "detail": f"Commission ₹{commission_amount} credited to mediator",
+        "commission_amount": commission_amount,
+        "status": "approved",
+    }
+
+
+@router.post("/bookings/{booking_id}/credit-owner")
+def credit_owner(
+    booking_id: int,
+    net_amount: float = Query(None, ge=0, description="Custom net amount (null = auto-calc from booking minus commission)"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Admin credits earnings to property owner for a booking.
+    Creates a Payout record. Auto-calculates: gross - platform commission = net.
+    """
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    # Check for existing payout
+    existing = db.query(Payout).filter(Payout.booking_id == booking_id).first()
+    if existing:
+        if existing.status == "processed":
+            raise HTTPException(status_code=400, detail="Owner already paid for this booking")
+        # If pending, process it
+        existing.status = "processed"
+        existing.payout_date = datetime.datetime.now(timezone.utc)
+        if net_amount is not None:
+            existing.net_amount = Decimal(str(net_amount))
+        db.commit()
+
+        from ...services.notifications import send_push_to_user
+        prop = db.query(Property).filter(Property.id == booking.property_id).first()
+        send_push_to_user(
+            user_id=booking.owner_id,
+            title="Payment Credited!",
+            body=f"₹{float(existing.net_amount)} received for booking at {prop.name if prop else 'your property'}",
+            data={
+                "type": "earnings_credited",
+                "amount": str(float(existing.net_amount)),
+                "booking_id": str(booking_id),
+                "property_name": prop.name if prop else "",
+            },
+            db=db,
+        )
+        return {
+            "detail": f"₹{float(existing.net_amount)} credited to owner",
+            "net_amount": float(existing.net_amount),
+            "status": "processed",
+        }
+
+    # Calculate amounts
+    gross = float(booking.total_amount)
+    prop = db.query(Property).filter(Property.id == booking.property_id).first()
+
+    if net_amount is not None:
+        commission_amt = gross - net_amount
+    else:
+        # Use property commission override or global
+        commission_pct = prop.commission_override if (prop and prop.commission_override is not None) else float(settings.COMMISSION_PERCENTAGE)
+        if prop and prop.commission_type == "fixed" and prop.commission_override is not None:
+            commission_amt = prop.commission_override
+        else:
+            commission_amt = round(gross * commission_pct / 100, 2)
+        net_amount = gross - commission_amt
+
+    payout = Payout(
+        owner_id=booking.owner_id,
+        booking_id=booking_id,
+        gross_amount=Decimal(str(gross)),
+        commission_amount=Decimal(str(commission_amt)),
+        net_amount=Decimal(str(net_amount)),
+        status="processed",
+        payout_date=datetime.datetime.now(timezone.utc),
+    )
+    db.add(payout)
+    db.commit()
+
+    # Send push notification to owner
+    from ...services.notifications import send_push_to_user
+    send_push_to_user(
+        user_id=booking.owner_id,
+        title="Payment Credited!",
+        body=f"₹{net_amount} received for booking at {prop.name if prop else 'your property'}",
+        data={
+            "type": "earnings_credited",
+            "amount": str(net_amount),
+            "booking_id": str(booking_id),
+            "property_name": prop.name if prop else "",
+        },
+        db=db,
+    )
+
+    return {
+        "detail": f"₹{net_amount} credited to owner (commission: ₹{commission_amt})",
+        "gross_amount": gross,
+        "commission_amount": commission_amt,
+        "net_amount": net_amount,
+        "status": "processed",
     }
 
 
