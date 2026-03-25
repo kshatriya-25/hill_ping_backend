@@ -12,4 +12,5 @@ env/
 /env
 venv
 venv/
-.env
+.envfirebase-credentials.json
+firebase-credentials.json
