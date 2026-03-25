@@ -1,2 +1,4 @@
 systemctl status hillpingapi
 systemctl restart hillpingapi
+journalctl -u hillpingapi -f
+journalctl -u hillpingapi -n 100

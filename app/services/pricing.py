@@ -12,11 +12,14 @@ def calculate_booking_price(
     room: Room,
     check_in: datetime.date,
     check_out: datetime.date,
+    commission_override: float = None,
+    commission_type: str = "percentage",
 ) -> dict:
     """
     Calculate the total price for a stay.
 
     Weekday = Mon-Thu, Weekend = Fri-Sun.
+    commission_type: "percentage" or "fixed"
     Returns dict with: base_amount, service_fee, total_amount, nights, breakdown
     """
     nights = (check_out - check_in).days
@@ -39,8 +42,12 @@ def calculate_booking_price(
         total += price
         current += datetime.timedelta(days=1)
 
-    commission_rate = Decimal(str(settings.COMMISSION_PERCENTAGE)) / Decimal("100")
-    service_fee = (total * commission_rate).quantize(Decimal("0.01"))
+    if commission_override is not None and commission_type == "fixed":
+        service_fee = Decimal(str(commission_override)).quantize(Decimal("0.01"))
+    else:
+        pct = commission_override if commission_override is not None else settings.COMMISSION_PERCENTAGE
+        commission_rate = Decimal(str(pct)) / Decimal("100")
+        service_fee = (total * commission_rate).quantize(Decimal("0.01"))
 
     return {
         "base_amount": total,

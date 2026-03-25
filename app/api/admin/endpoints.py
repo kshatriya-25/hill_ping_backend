@@ -172,6 +172,8 @@ def admin_list_properties(
             "photos_count": len(photos),
             "cover_photo": cover.url if cover else None,
             "amenities": amenity_names,
+            "commission_override": p.commission_override,
+            "commission_type": p.commission_type,
             "booking_count": booking_count,
             "rooms": [
                 {
@@ -190,6 +192,32 @@ def admin_list_properties(
     return {
         "total": total,
         "properties": result,
+    }
+
+
+@router.patch("/properties/{property_id}/commission")
+def set_property_commission(
+    property_id: int,
+    commission: float = Query(None, ge=0, description="Commission value (null to reset to global)"),
+    commission_type: str = Query("percentage", pattern=r'^(percentage|fixed)$', description="percentage or fixed"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin sets per-property commission override. Pass null commission to reset to global."""
+    prop = db.query(Property).filter(Property.id == property_id).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    prop.commission_override = commission
+    prop.commission_type = commission_type if commission is not None else "percentage"
+    db.commit()
+    label = "reset to global" if commission is None else (
+        f"set to ₹{commission} fixed" if commission_type == "fixed" else f"set to {commission}%"
+    )
+    return {
+        "detail": f"Commission {label}",
+        "property_id": property_id,
+        "commission_override": commission,
+        "commission_type": prop.commission_type,
     }
 
 

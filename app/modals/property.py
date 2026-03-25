@@ -37,6 +37,8 @@ class Property(Base):
     status = Column(String(20), nullable=False, default="offline")  # online, offline, full
     is_verified = Column(Boolean, default=False, nullable=False)
     is_instant_confirm = Column(Boolean, default=False, nullable=False)
+    commission_override = Column(Float, nullable=True)  # Per-property commission %, null = use global
+    commission_type = Column(String(10), nullable=False, default="percentage")  # percentage or fixed
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(
         DateTime(timezone=True),
