@@ -334,7 +334,7 @@ def search_properties(
         photo_urls = [p.url for p in photos]
 
         # Get rating
-        rating_result = db.query(func.avg(Review.rating)).filter(Review.property_id == prop.id).scalar()
+        rating_result = db.query(func.avg(Review.rating_overall)).filter(Review.property_id == prop.id).scalar()
 
         # Get owner name
         owner = db.query(User).filter(User.id == prop.owner_id).first()
