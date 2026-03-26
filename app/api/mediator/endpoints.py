@@ -351,7 +351,7 @@ def search_properties(
             "status": prop.status,
             "is_verified": prop.is_verified,
             "is_instant_confirm": prop.is_instant_confirm,
-            "cover_photo": prop.cover_photo,
+            "cover_photo": photo_urls[0] if photo_urls else None,
             "photos": photo_urls,
             "price_min": float(price_min) if price_min else None,
             "rating_avg": round(float(rating_result), 1) if rating_result else None,
