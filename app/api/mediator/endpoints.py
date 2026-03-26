@@ -44,6 +44,34 @@ def _generate_referral_code(length: int = 8) -> str:
     return "HP-" + "".join(secrets.choice(chars) for _ in range(length))
 
 
+def _get_or_create_mediator_profile(db: Session, user_id: int) -> MediatorProfile:
+    """
+    Get mediator profile, auto-creating one if the user was assigned
+    the mediator role via admin without going through /register.
+    """
+    profile = db.query(MediatorProfile).filter(
+        MediatorProfile.user_id == user_id
+    ).first()
+    if profile:
+        return profile
+
+    referral_code = _generate_referral_code()
+    while db.query(MediatorProfile).filter(MediatorProfile.referral_code == referral_code).first():
+        referral_code = _generate_referral_code()
+
+    profile = MediatorProfile(
+        user_id=user_id,
+        mediator_type="freelance_agent",
+        verification_status="verified",
+        referral_code=referral_code,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    logger.info("Auto-created mediator profile for user_id=%d", user_id)
+    return profile
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 @router.post("/register")
@@ -145,11 +173,7 @@ def get_profile(
     current_user: User = Depends(require_role("mediator")),
 ):
     """Get the current mediator's profile."""
-    profile = db.query(MediatorProfile).filter(
-        MediatorProfile.user_id == current_user.id
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Mediator profile not found")
+    profile = _get_or_create_mediator_profile(db, current_user.id)
     return profile
 
 
@@ -160,11 +184,7 @@ def update_profile(
     current_user: User = Depends(require_role("mediator")),
 ):
     """Update mediator profile fields."""
-    profile = db.query(MediatorProfile).filter(
-        MediatorProfile.user_id == current_user.id
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Mediator profile not found")
+    profile = _get_or_create_mediator_profile(db, current_user.id)
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -187,11 +207,7 @@ def get_dashboard(
     from ...modals.mediator import MediatorReliabilityScore
     import datetime
 
-    profile = db.query(MediatorProfile).filter(
-        MediatorProfile.user_id == current_user.id
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Mediator profile not found")
+    profile = _get_or_create_mediator_profile(db, current_user.id)
 
     today = datetime.date.today()
     month_start = today.replace(day=1)
@@ -234,18 +250,17 @@ def search_properties(
 ):
     """
     Search properties sorted by distance from mediator's current GPS location.
-    Uses Haversine approximation for distance calculation.
+    Returns rich data: photos, price, rating, commission estimate.
     """
-    from ...modals.property import Property, Room
-    from sqlalchemy import func, cast, Float, case, literal_column
+    from ...modals.property import Property, Room, PropertyPhoto
+    from ...modals.review import Review
+    from ...services.platform_config import get_config
+    from sqlalchemy import func
     import math
 
     # Haversine distance approximation in SQL (returns km)
-    # For small distances, this is accurate enough
-    lat_rad = math.radians(latitude)
     dlat = func.radians(Property.latitude - latitude)
     dlng = func.radians(Property.longitude - longitude)
-
     a = (
         func.sin(dlat / 2) * func.sin(dlat / 2)
         + func.cos(func.radians(latitude))
@@ -269,8 +284,8 @@ def search_properties(
     # Filter by distance
     query = query.having(distance_km <= max_distance_km)
 
-    # Filter by price range (join rooms)
-    if min_price or max_price:
+    # Filter by price range (join rooms to check price)
+    if min_price or max_price or guests > 1:
         query = query.join(Room, Room.property_id == Property.id)
         if min_price:
             query = query.filter(Room.price_weekday >= min_price)
@@ -285,20 +300,70 @@ def search_properties(
 
     results = query.all()
 
-    return [
-        {
+    # Get commission tiers from platform config
+    tier1_flat = float(get_config("mediator_commission_tier1_flat", db) or "50")
+    tier2_rate = float(get_config("mediator_commission_tier2_rate", db) or "5")
+    tier3_rate = float(get_config("mediator_commission_tier3_rate", db) or "6")
+    tier4_rate = float(get_config("mediator_commission_tier4_rate", db) or "7")
+
+    def estimate_commission(price):
+        """Estimate mediator commission based on nightly price."""
+        if price is None:
+            return 0
+        p = float(price)
+        if p <= 1000:
+            return tier1_flat
+        elif p <= 3000:
+            return round(p * tier2_rate / 100)
+        elif p <= 10000:
+            return round(p * tier3_rate / 100)
+        else:
+            return round(p * tier4_rate / 100)
+
+    response = []
+    for prop, dist in results:
+        # Get rooms for price info
+        rooms = db.query(Room).filter(Room.property_id == prop.id).all()
+        price_min = min((r.price_weekday for r in rooms), default=None) if rooms else None
+        rooms_count = len(rooms)
+
+        # Get photos
+        photos = db.query(PropertyPhoto).filter(
+            PropertyPhoto.property_id == prop.id
+        ).order_by(PropertyPhoto.display_order).all()
+        photo_urls = [p.url for p in photos]
+
+        # Get rating
+        rating_result = db.query(func.avg(Review.rating)).filter(Review.property_id == prop.id).scalar()
+
+        # Get owner name
+        owner = db.query(User).filter(User.id == prop.owner_id).first()
+
+        # Commission estimate
+        commission = estimate_commission(price_min)
+
+        response.append({
             "id": prop.id,
             "name": prop.name,
+            "city": prop.city or "",
+            "state": prop.state,
             "property_type": prop.property_type,
-            "distance_km": round(float(dist), 2),
+            "status": prop.status,
+            "is_verified": prop.is_verified,
+            "is_instant_confirm": prop.is_instant_confirm,
+            "cover_photo": prop.cover_photo,
+            "photos": photo_urls,
+            "price_min": float(price_min) if price_min else None,
+            "rating_avg": round(float(rating_result), 1) if rating_result else None,
+            "owner_name": owner.name if owner else None,
+            "rooms_count": rooms_count,
             "latitude": prop.latitude,
             "longitude": prop.longitude,
-            "status": prop.status,
-            "is_instant_confirm": prop.is_instant_confirm,
-            "address": prop.address,
-        }
-        for prop, dist in results
-    ]
+            "distance_km": round(float(dist), 2),
+            "commission_estimate": commission,
+        })
+
+    return response
 
 
 # ── Bulk Ping ─────────────────────────────────────────────────────────────────
@@ -418,11 +483,7 @@ def wallet_balance(
     current_user: User = Depends(require_role("mediator")),
 ):
     """Get mediator wallet balance."""
-    profile = db.query(MediatorProfile).filter(
-        MediatorProfile.user_id == current_user.id
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Mediator profile not found")
+    profile = _get_or_create_mediator_profile(db, current_user.id)
 
     return {
         "balance": float(profile.wallet_balance),
@@ -469,11 +530,7 @@ def wallet_topup(
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
-    profile = db.query(MediatorProfile).filter(
-        MediatorProfile.user_id == current_user.id
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Mediator profile not found")
+    profile = _get_or_create_mediator_profile(db, current_user.id)
 
     profile.wallet_balance += Decimal(str(amount))
 

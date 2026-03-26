@@ -246,11 +246,42 @@ def change_user_role(
     db: Session = Depends(getdb),
     _admin: User = Depends(require_admin),
 ):
-    """Admin changes a user's role."""
+    """Admin changes a user's role. Auto-creates MediatorProfile if switching to mediator."""
+    import secrets
+    import string
+    from ...modals.mediator import MediatorProfile
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
     user.role = role
+
+    # When role changes to mediator, ensure a MediatorProfile exists
+    if role == "mediator":
+        existing_profile = db.query(MediatorProfile).filter(
+            MediatorProfile.user_id == user_id
+        ).first()
+        if not existing_profile:
+            # Generate unique referral code
+            def _gen_code():
+                chars = string.ascii_uppercase + string.digits
+                return "HP-" + "".join(secrets.choice(chars) for _ in range(8))
+
+            referral_code = _gen_code()
+            while db.query(MediatorProfile).filter(
+                MediatorProfile.referral_code == referral_code
+            ).first():
+                referral_code = _gen_code()
+
+            profile = MediatorProfile(
+                user_id=user_id,
+                mediator_type="freelance_agent",
+                verification_status="verified",
+                referral_code=referral_code,
+            )
+            db.add(profile)
+
     db.commit()
     return {"detail": f"User {user_id} role changed to {role}"}
 
@@ -951,6 +982,96 @@ def mediator_stats(
             "is_suspended": score.is_suspended if score else False,
         } if score else None,
     }
+
+
+@router.post("/mediators/{user_id}/credit-wallet")
+def credit_mediator_wallet(
+    user_id: int,
+    amount: float = Query(..., gt=0, description="Amount to credit in ₹"),
+    description: str = Query(default="Admin credit", description="Reason for credit"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin directly credits money to a mediator's wallet."""
+    from ...modals.mediator import MediatorProfile, MediatorWalletTransaction
+
+    profile = db.query(MediatorProfile).filter(MediatorProfile.user_id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Mediator profile not found")
+
+    profile.wallet_balance += Decimal(str(amount))
+    new_balance = profile.wallet_balance
+
+    tx = MediatorWalletTransaction(
+        mediator_id=user_id,
+        type="credit",
+        amount=Decimal(str(amount)),
+        balance_after=new_balance,
+        reference=f"ADMIN-{_admin.id}",
+        description=description,
+    )
+    db.add(tx)
+    db.commit()
+
+    # Send FCM notification
+    from ...services.fcm import send_notification_to_user
+    try:
+        send_notification_to_user(
+            db=db,
+            user_id=user_id,
+            title="Payment Credited!",
+            body=f"₹{amount:.0f} has been added to your wallet. New balance: ₹{float(new_balance):.0f}",
+            data={"type": "earnings_credited", "amount": str(amount)},
+        )
+    except Exception:
+        pass  # Don't fail the credit if notification fails
+
+    return {
+        "detail": f"₹{amount:.0f} credited to mediator wallet",
+        "new_balance": float(new_balance),
+    }
+
+
+@router.post("/owners/{user_id}/credit-earnings")
+def credit_owner_earnings(
+    user_id: int,
+    amount: float = Query(..., gt=0, description="Amount to credit in ₹"),
+    description: str = Query(default="Admin credit", description="Reason for credit"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Admin directly credits earnings to a property owner."""
+    from ...modals.booking import Payout
+
+    user = db.query(User).filter(User.id == user_id, User.role == "owner").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Owner not found")
+
+    payout = Payout(
+        owner_id=user_id,
+        booking_id=None,
+        gross_amount=Decimal(str(amount)),
+        commission_amount=Decimal("0"),
+        net_amount=Decimal(str(amount)),
+        status="processed",
+    )
+    db.add(payout)
+    db.commit()
+
+    # Send FCM notification
+    from ...services.fcm import send_notification_to_user
+    try:
+        send_notification_to_user(
+            db=db,
+            user_id=user_id,
+            title="Payment Credited!",
+            body=f"₹{amount:.0f} has been credited to your account.",
+            data={"type": "earnings_credited", "amount": str(amount)},
+        )
+    except Exception:
+        pass
+
+    return {"detail": f"₹{amount:.0f} credited to owner"}
 
 
 @router.get("/matches")
