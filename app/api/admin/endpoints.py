@@ -1014,11 +1014,11 @@ def credit_mediator_wallet(
     db.commit()
 
     # Send FCM notification
-    from ...services.fcm import send_notification_to_user
+    from ...services.notifications import send_push_to_user
     try:
-        send_notification_to_user(
-            db=db,
+        send_push_to_user(
             user_id=user_id,
+            db=db,
             title="Payment Credited!",
             body=f"₹{amount:.0f} has been added to your wallet. New balance: ₹{float(new_balance):.0f}",
             data={"type": "earnings_credited", "amount": str(amount)},
@@ -1059,11 +1059,11 @@ def credit_owner_earnings(
     db.commit()
 
     # Send FCM notification
-    from ...services.fcm import send_notification_to_user
+    from ...services.notifications import send_push_to_user
     try:
-        send_notification_to_user(
-            db=db,
+        send_push_to_user(
             user_id=user_id,
+            db=db,
             title="Payment Credited!",
             body=f"₹{amount:.0f} has been credited to your account.",
             data={"type": "earnings_credited", "amount": str(amount)},
