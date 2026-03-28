@@ -90,7 +90,7 @@ class BookingListItem(BaseModel):
 class PayoutResponse(BaseModel):
     id: int
     owner_id: int
-    booking_id: int
+    booking_id: Optional[int] = None
     booking_ref: Optional[str] = None
     gross_amount: Decimal
     commission_amount: Decimal
