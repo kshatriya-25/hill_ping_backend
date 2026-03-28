@@ -80,7 +80,7 @@ class Payout(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=True, index=True)  # nullable for admin direct credits
 
     gross_amount = Column(Numeric(10, 2), nullable=False)
     commission_amount = Column(Numeric(10, 2), nullable=False)

@@ -19,7 +19,7 @@ from ...services.ping import (
     check_instant_confirm,
     PingError,
 )
-from ...utils.utils import get_current_user, require_guest, require_owner
+from ...utils.utils import get_current_user, require_guest, require_owner, require_role
 from ..ws.connection_manager import ws_manager
 
 router = APIRouter(tags=["ping"])
@@ -288,3 +288,59 @@ def my_pending_pings(
             result.append(ping)
 
     return result
+
+
+@router.get("/my-history")
+def my_ping_history(
+    status: str | None = None,
+    skip: int = 0,
+    limit: int = 30,
+    db: Session = Depends(getdb),
+    current_user: User = Depends(require_role("owner", "mediator")),
+):
+    """Owner or mediator views their ping history with optional status filter."""
+    q = db.query(PingSessionModel)
+
+    if current_user.role == "owner":
+        q = q.filter(PingSessionModel.owner_id == current_user.id)
+    else:
+        q = q.filter(PingSessionModel.mediator_id == current_user.id)
+
+    if status:
+        q = q.filter(PingSessionModel.status == status)
+
+    total = q.count()
+    pings = q.order_by(PingSessionModel.created_at.desc()).offset(skip).limit(limit).all()
+
+    items = []
+    for p in pings:
+        # Resolve property name
+        prop = db.query(Property).filter(Property.id == p.property_id).first()
+        # Resolve guest/mediator names
+        guest = db.query(User).filter(User.id == p.guest_id).first() if p.guest_id else None
+        mediator = db.query(User).filter(User.id == p.mediator_id).first() if p.mediator_id else None
+
+        items.append({
+            "id": p.id,
+            "session_id": p.session_id,
+            "property_id": p.property_id,
+            "property_name": prop.name if prop else None,
+            "guest_id": p.guest_id,
+            "guest_name": guest.name if guest else None,
+            "guest_phone": guest.phone if guest else None,
+            "mediator_id": p.mediator_id,
+            "mediator_name": mediator.name if mediator else None,
+            "check_in": str(p.check_in),
+            "check_out": str(p.check_out),
+            "guests_count": p.guests_count,
+            "status": p.status,
+            "response_time_seconds": p.owner_response_time,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "responded_at": p.responded_at.isoformat() if p.responded_at else None,
+        })
+
+    return {
+        "total": total,
+        "pings": items,
+        "has_more": (skip + limit) < total,
+    }
