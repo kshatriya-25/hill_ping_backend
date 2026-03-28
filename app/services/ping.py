@@ -174,12 +174,18 @@ def handle_ping_response(
     if ping.status != "pending":
         raise PingError(f"Ping already {ping.status}")
 
-    # Check Redis — if key is gone, it's expired
-    redis_data = get_ping_session(session_id)
-    if redis_data is None:
-        # TTL expired, mark as expired in DB
+    # Check expiry — use DB expires_at with a grace period (network latency buffer)
+    # Redis TTL may expire slightly before the client countdown reaches 0
+    GRACE_SECONDS = 5
+    now = datetime.datetime.now(timezone.utc)
+    expires_at = ping.expires_at.replace(tzinfo=timezone.utc) if ping.expires_at.tzinfo is None else ping.expires_at
+
+    if now > expires_at + timedelta(seconds=GRACE_SECONDS):
+        # Truly expired — beyond grace period
         ping.status = "expired"
         db.commit()
+        # Clean up Redis if still there
+        delete_ping_session(session_id)
         raise PingError("Ping session has expired")
 
     now = datetime.datetime.now(timezone.utc)
