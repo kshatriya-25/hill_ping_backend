@@ -114,7 +114,20 @@ def create_ping_session(
         PingSession.status == "pending",
     ).first()
     if existing:
-        raise PingError("You already have a pending availability check for this property")
+        # If the pending ping is already expired (TTL elapsed / Redis key gone), expire it now
+        # so the user can re-ping without waiting for a background sweep.
+        try:
+            check_and_expire_pending(existing.session_id, db)
+        except Exception:
+            # Fail open: if expiry check fails, keep legacy behavior (block duplicate)
+            pass
+        existing = db.query(PingSession).filter(
+            PingSession.guest_id == guest_id,
+            PingSession.property_id == property_id,
+            PingSession.status == "pending",
+        ).first()
+        if existing:
+            raise PingError("You already have a pending availability check for this property")
 
     # ── Create ping session ───────────────────────────────────────────────
     session_id = uuid.uuid4().hex
@@ -256,6 +269,12 @@ def check_and_expire_pending(session_id: str, db: Session) -> str:
 
     if ping.status != "pending":
         return ping.status
+
+    # Expire on DB timestamp too (covers Redis delays/misconfig and ensures correctness)
+    now = datetime.datetime.now(timezone.utc)
+    if ping.expires_at and ping.expires_at <= now:
+        expire_ping_session_by_id(session_id, db)
+        return "expired"
 
     # Check Redis
     redis_data = get_ping_session(session_id)
