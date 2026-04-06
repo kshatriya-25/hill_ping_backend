@@ -85,3 +85,4 @@ class MediatorDashboard(BaseModel):
     success_rate: float = 0.0
     reliability_score: float = 100.0
     wallet_balance: Decimal = Decimal("0")
+    match_hotline_phone: str = "6384075907"

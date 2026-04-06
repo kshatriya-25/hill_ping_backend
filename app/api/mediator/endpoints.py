@@ -222,6 +222,8 @@ def get_dashboard(
         MediatorReliabilityScore.mediator_id == current_user.id
     ).first()
 
+    from ...core.config import settings as app_settings
+
     return MediatorDashboard(
         todays_bookings=todays_bookings,
         pending_payouts=0,  # TODO: calculate from mediator_commissions
@@ -229,6 +231,7 @@ def get_dashboard(
         success_rate=0.0,  # TODO: calculate from ping conversions
         reliability_score=reliability.total_score if reliability else 100.0,
         wallet_balance=profile.wallet_balance,
+        match_hotline_phone=app_settings.MEDIATOR_MATCH_HOTLINE or "6384075907",
     )
 
 

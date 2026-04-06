@@ -38,6 +38,18 @@ class PingError(Exception):
         self.status_code = status_code
 
 
+def effective_guest_name_phone_for_mediator_ping(ping: PingSession, guest: User | None) -> tuple[str | None, str | None]:
+    """
+    Bulk mediator pings store guest_id = mediator_id when no registered guest.
+    Do not surface the mediator profile as the guest in admin / notifications.
+    """
+    if ping.mediator_id and guest is not None and ping.guest_id == ping.mediator_id:
+        return None, None
+    if guest is None:
+        return None, None
+    return guest.name, guest.phone
+
+
 def create_ping_session(
     guest_id: int,
     property_id: int,

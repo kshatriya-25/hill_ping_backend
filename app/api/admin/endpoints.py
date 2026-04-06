@@ -1135,11 +1135,15 @@ def admin_mediator_matches(
     )
 
     result = []
+    from ...services.ping import effective_guest_name_phone_for_mediator_ping
+
     for p in pings:
         prop = db.query(Property).filter(Property.id == p.property_id).first()
         guest = db.query(User).filter(User.id == p.guest_id).first()
         mediator = db.query(User).filter(User.id == p.mediator_id).first()
         owner = db.query(User).filter(User.id == p.owner_id).first()
+
+        g_name, g_phone = effective_guest_name_phone_for_mediator_ping(p, guest)
 
         result.append({
             "id": p.id,
@@ -1154,8 +1158,8 @@ def admin_mediator_matches(
             "mediator_name": mediator.name if mediator else None,
             "mediator_phone": mediator.phone if mediator else None,
             "guest_id": p.guest_id,
-            "guest_name": guest.name if guest else None,
-            "guest_phone": guest.phone if guest else None,
+            "guest_name": g_name,
+            "guest_phone": g_phone,
             "check_in": str(p.check_in),
             "check_out": str(p.check_out),
             "guests_count": p.guests_count,

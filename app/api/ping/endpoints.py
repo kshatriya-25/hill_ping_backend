@@ -18,6 +18,7 @@ from ...services.ping import (
     get_pending_pings_for_owner,
     check_instant_confirm,
     PingError,
+    effective_guest_name_phone_for_mediator_ping,
 )
 from ...utils.utils import get_current_user, require_guest, require_owner, require_role
 from ..ws.connection_manager import ws_manager
@@ -75,6 +76,8 @@ def _notify_admins_bg(ping_id: int):
         mediator = db.query(User).filter(User.id == ping.mediator_id).first()
         owner = db.query(User).filter(User.id == ping.owner_id).first()
 
+        g_name, g_phone = effective_guest_name_phone_for_mediator_ping(ping, guest)
+
         admin_msg = {
             "type": "mediator_ping_accepted",
             "session_id": ping.session_id,
@@ -88,8 +91,8 @@ def _notify_admins_bg(ping_id: int):
             "mediator_name": mediator.name if mediator else "",
             "mediator_phone": mediator.phone if mediator else "",
             "guest_id": ping.guest_id,
-            "guest_name": guest.name if guest else "",
-            "guest_phone": guest.phone if guest else "",
+            "guest_name": g_name or "",
+            "guest_phone": g_phone or "",
             "check_in": str(ping.check_in),
             "check_out": str(ping.check_out),
             "guests_count": ping.guests_count,
@@ -112,27 +115,27 @@ def _notify_admins_bg(ping_id: int):
 
         # Send FCM push to all admins
         from ...services.notifications import send_push_to_user
-        guest_name = guest.name if guest else "Guest"
+        guest_label = g_name or "Walk-in guest"
+        guest_phone_bit = f" ({g_phone})" if g_phone else ""
         mediator_name = mediator.name if mediator else "Mediator"
         prop_name = prop.name if prop else "a property"
+
+        def _fcm_val(v):
+            if v is None:
+                return ""
+            return str(v)
+
+        fcm_flat = {k: _fcm_val(v) for k, v in admin_msg.items()}
 
         for admin in admins:
             send_push_to_user(
                 user_id=admin.id,
                 title="Mediator Booking Match!",
                 body=(
-                    f"{mediator_name} matched {guest_name} ({guest.phone if guest else 'N/A'}) "
+                    f"{mediator_name} matched {guest_label}{guest_phone_bit} "
                     f"with {prop_name}. Check-in: {ping.check_in}"
                 ),
-                data={
-                    "type": "mediator_ping_accepted",
-                    "session_id": ping.session_id,
-                    "property_id": str(ping.property_id),
-                    "mediator_id": str(ping.mediator_id),
-                    "mediator_phone": mediator.phone if mediator else "",
-                    "guest_id": str(ping.guest_id),
-                    "guest_phone": guest.phone if guest else "",
-                },
+                data=fcm_flat,
                 db=db,
             )
 

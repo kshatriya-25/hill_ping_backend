@@ -48,8 +48,10 @@ class Settings:
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_REFRESH_SECRET_KEY: str = os.getenv("JWT_REFRESH_SECRET_KEY", "")
 
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-    REFRESH_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 7)))  # 7 days
+    # Default ~6 months; override with ACCESS_TOKEN_EXPIRE_MINUTES in .env
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 183)))
+    # Default 365 days — long-lived sessions; override via REFRESH_TOKEN_EXPIRE_MINUTES in .env
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 365)))
 
     # ── Account lockout ────────────────────────────────────────────────────────
     MAX_LOGIN_ATTEMPTS: int = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
@@ -96,6 +98,9 @@ class Settings:
     TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
     TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
+
+    # ── Mediator match: in-app "Call" hotline (digits; shown in mediator app after owner accepts)
+    MEDIATOR_MATCH_HOTLINE: str = os.getenv("MEDIATOR_MATCH_HOTLINE", "6384075907").strip()
 
     # ── Upload directories (extended) ─────────────────────────────────────────
     PROPERTY_PHOTO_DIR: str = os.path.join(UPLOAD_BASE_DIR, "property_photos")
