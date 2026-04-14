@@ -14,10 +14,7 @@ class MediatorRegister(BaseModel):
     phone: str = Field(..., max_length=15)
     password: str = Field(..., min_length=8)
 
-    mediator_type: str = Field(
-        default="freelance_agent",
-        pattern=r'^(auto_driver|travel_desk|local_guide|shop_owner|freelance_agent|hotel_front_desk)$',
-    )
+    mediator_type: str = Field(default="freelance_agent", min_length=1, max_length=50)
     operating_zone: Optional[list[dict]] = None
     aadhaar_doc_url: Optional[str] = None
     referral_code: Optional[str] = None  # referrer's code
@@ -25,10 +22,7 @@ class MediatorRegister(BaseModel):
 
 class MediatorProfileUpdate(BaseModel):
     """Partial update for mediator profile."""
-    mediator_type: Optional[str] = Field(
-        default=None,
-        pattern=r'^(auto_driver|travel_desk|local_guide|shop_owner|freelance_agent|hotel_front_desk)$',
-    )
+    mediator_type: Optional[str] = Field(default=None, min_length=1, max_length=50)
     operating_zone: Optional[list[dict]] = None
     aadhaar_doc_url: Optional[str] = None
     profile_photo_url: Optional[str] = None

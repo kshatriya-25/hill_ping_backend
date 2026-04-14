@@ -17,7 +17,7 @@ class PingRequest(BaseModel):
 
 class PingResponse(BaseModel):
     """Owner responds to a ping."""
-    action: str = Field(..., pattern=r'^(accept|reject)$')
+    action: str = Field(..., min_length=1, max_length=20)
 
 
 class PingSessionResponse(BaseModel):

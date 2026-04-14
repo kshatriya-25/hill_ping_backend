@@ -28,7 +28,7 @@ class AmenityResponse(BaseModel):
 
 class RoomCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    room_type: str = Field(default="double", pattern=r'^(single|double|dormitory|suite)$')
+    room_type: str = Field(default="double", min_length=1, max_length=30)
     capacity: int = Field(default=2, ge=1, le=50)
     total_rooms: int = Field(default=1, ge=1, le=500)
     price_weekday: Decimal = Field(..., ge=0)
@@ -40,7 +40,7 @@ class RoomCreate(BaseModel):
 
 class RoomUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    room_type: Optional[str] = Field(default=None, pattern=r'^(single|double|dormitory|suite)$')
+    room_type: Optional[str] = Field(default=None, min_length=1, max_length=30)
     capacity: Optional[int] = Field(default=None, ge=1, le=50)
     total_rooms: Optional[int] = Field(default=None, ge=1, le=500)
     price_weekday: Optional[Decimal] = Field(default=None, ge=0)
@@ -88,8 +88,8 @@ class PropertyCreate(BaseModel):
     state: str = Field(..., min_length=1, max_length=100)
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
-    property_type: str = Field(default="homestay", pattern=r'^(homestay|hotel|cottage|villa)$')
-    cancellation_policy: str = Field(default="flexible", pattern=r'^(flexible|moderate|strict)$')
+    property_type: str = Field(default="homestay", min_length=1, max_length=30)
+    cancellation_policy: str = Field(default="flexible", min_length=1, max_length=30)
     amenity_ids: list[int] = Field(default_factory=list)
 
 
@@ -101,13 +101,13 @@ class PropertyUpdate(BaseModel):
     state: Optional[str] = Field(default=None, min_length=1, max_length=100)
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
-    property_type: Optional[str] = Field(default=None, pattern=r'^(homestay|hotel|cottage|villa)$')
-    cancellation_policy: Optional[str] = Field(default=None, pattern=r'^(flexible|moderate|strict)$')
+    property_type: Optional[str] = Field(default=None, min_length=1, max_length=30)
+    cancellation_policy: Optional[str] = Field(default=None, min_length=1, max_length=30)
     amenity_ids: Optional[list[int]] = None
 
 
 class StatusUpdate(BaseModel):
-    status: str = Field(..., pattern=r'^(online|offline|full)$')
+    status: str = Field(..., min_length=1, max_length=20)
 
 
 class PropertyOwnerInfo(BaseModel):
@@ -168,7 +168,7 @@ class PropertyListItem(BaseModel):
 class DateBlockCreate(BaseModel):
     room_id: Optional[int] = None
     block_date: date
-    reason: Optional[str] = Field(default=None, pattern=r'^(offline_booking|maintenance|personal)$')
+    reason: Optional[str] = Field(default=None, min_length=1, max_length=50)
 
 
 class DateBlockResponse(BaseModel):
