@@ -22,7 +22,6 @@ from ...schemas.mediatorSchema import (
     MediatorDashboard,
     BulkPingRequest,
 )
-from ...schemas.pingSchema import PingSessionResponse
 from ...utils.utils import (
     get_current_user,
     get_hashed_password,
@@ -31,7 +30,12 @@ from ...utils.utils import (
     require_role,
     validate_password_strength,
 )
-from ...services.ping import create_bulk_ping_sessions, get_bulk_ping_status, PingError
+from ...services.ping import (
+    create_bulk_ping_sessions,
+    get_bulk_ping_status,
+    ping_session_to_response_dict,
+    PingError,
+)
 
 router = APIRouter(tags=["mediator"])
 limiter = Limiter(key_func=get_remote_address)
@@ -335,11 +339,11 @@ def search_properties(
         else:
             return round(p * tier4_rate / 100)
 
+    from ...services.pricing import room_min_guest_nightly, mediator_listing_fee_per_night
+
     response = []
     for prop, dist in results:
-        # Get rooms for price info
         rooms = db.query(Room).filter(Room.property_id == prop.id).all()
-        from ...services.pricing import room_min_guest_nightly
 
         price_min = min((room_min_guest_nightly(r) for r in rooms), default=None) if rooms else None
         rooms_count = len(rooms)
@@ -356,8 +360,8 @@ def search_properties(
         # Get owner name
         owner = db.query(User).filter(User.id == prop.owner_id).first()
 
-        # Commission estimate
         commission = estimate_commission(price_min)
+        mediator_ppn = mediator_listing_fee_per_night(rooms, price_min)
 
         response.append({
             "id": prop.id,
@@ -370,14 +374,15 @@ def search_properties(
             "is_instant_confirm": prop.is_instant_confirm,
             "cover_photo": photo_urls[0] if photo_urls else None,
             "photos": photo_urls,
-            "price_min": float(price_min) if price_min else None,
+            "price_min": float(price_min) if price_min is not None else None,
             "rating_avg": round(float(rating_result), 1) if rating_result else None,
             "owner_name": owner.name if owner else None,
             "rooms_count": rooms_count,
             "latitude": prop.latitude,
             "longitude": prop.longitude,
             "distance_km": round(float(dist), 2),
-            "commission_estimate": commission,
+            "commission_estimate": int(round(commission)),
+            "mediator_price_per_night": float(mediator_ppn) if mediator_ppn is not None else None,
         })
 
     return response
@@ -460,7 +465,7 @@ def bulk_ping(
     return {
         "bulk_ping_group_id": group_id,
         "total_pinged": len(pings),
-        "pings": [PingSessionResponse.model_validate(p).model_dump() for p in pings],
+        "pings": [ping_session_to_response_dict(p, db) for p in pings],
     }
 
 
@@ -481,7 +486,7 @@ def bulk_ping_status(
 
     return {
         "bulk_ping_group_id": group_id,
-        "pings": [PingSessionResponse.model_validate(p).model_dump() for p in pings],
+        "pings": [ping_session_to_response_dict(p, db) for p in pings],
         "summary": {
             "total": len(pings),
             "accepted": sum(1 for p in pings if p.status == "accepted"),

@@ -40,6 +40,9 @@ class PingSessionResponse(BaseModel):
     created_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     responded_at: Optional[datetime] = None
+    # Populated for accepted pings (guest total; room flat mediator × nights)
+    total_price: Optional[float] = None
+    mediator_commission: Optional[float] = None
 
     model_config = {"from_attributes": True}
 

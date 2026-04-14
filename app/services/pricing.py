@@ -1,6 +1,7 @@
 # HillPing — Pricing Calculation Service
 
 import datetime
+import math
 from decimal import Decimal
 
 from ..modals.property import Room
@@ -27,6 +28,38 @@ def room_min_guest_nightly(room: Room) -> Decimal:
     wd = Decimal(str(room.price_weekday)) + extras
     we = Decimal(str(room.price_weekend)) + extras
     return min(wd, we)
+
+
+def mediator_listing_fee_per_night(rooms: list[Room], price_min_guest: Decimal | None) -> float | None:
+    """
+    Flat mediator ₹/night from room rows for mediator search / "Your cut".
+
+    Prefer rooms whose guest nightly floor matches the property's displayed price_min
+    (within ₹0.50 for rounding). Otherwise use the maximum configured fee across rooms.
+    """
+    if not rooms:
+        return None
+    fees: list[float] = []
+    for r in rooms:
+        mc = getattr(r, "mediator_commission", None)
+        if mc is not None:
+            fees.append(float(mc))
+    if not fees:
+        return None
+    if price_min_guest is None:
+        return max(fees)
+    min_g = float(price_min_guest)
+    tied: list[float] = []
+    for r in rooms:
+        mc = getattr(r, "mediator_commission", None)
+        if mc is None:
+            continue
+        rv = float(room_min_guest_nightly(r))
+        if math.isclose(rv, min_g, rel_tol=0.0, abs_tol=0.51):
+            tied.append(float(mc))
+    if tied:
+        return max(tied)
+    return max(fees)
 
 
 def _is_room_weekend(room: Room, d: datetime.date) -> bool:

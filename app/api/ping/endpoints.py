@@ -19,6 +19,7 @@ from ...services.ping import (
     check_instant_confirm,
     PingError,
     effective_guest_name_phone_for_mediator_ping,
+    ping_session_to_response_dict,
 )
 from ...utils.utils import get_current_user, require_guest, require_owner, require_role
 from ..ws.connection_manager import ws_manager
@@ -238,7 +239,7 @@ def respond_to_ping(
 
     # TODO: Phase 6 — trigger payment capture on accept, release on reject
 
-    return ping
+    return ping_session_to_response_dict(ping, db)
 
 
 @router.get("/{session_id}/status", response_model=PingStatusResponse)

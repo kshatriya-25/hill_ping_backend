@@ -50,6 +50,56 @@ def effective_guest_name_phone_for_mediator_ping(ping: PingSession, guest: User 
     return guest.name, guest.phone
 
 
+def _pick_room_for_ping_pricing(ping: PingSession, db: Session) -> Room | None:
+    """Choose a bookable room for pricing (cheapest guest-facing weekday floor)."""
+    if ping.room_id:
+        r = db.query(Room).filter(
+            Room.id == ping.room_id,
+            Room.property_id == ping.property_id,
+            Room.is_available == True,
+        ).first()
+        if r:
+            return r
+    q = db.query(Room).filter(
+        Room.property_id == ping.property_id,
+        Room.is_available == True,
+        Room.capacity >= ping.guests_count,
+    )
+    if hasattr(Room, "mediator_commission") and hasattr(Room, "platform_fee"):
+        guest_floor = (
+            Room.price_weekday
+            + func.coalesce(Room.mediator_commission, 0)
+            + func.coalesce(Room.platform_fee, 0)
+        )
+        return q.order_by(guest_floor.asc()).first()
+    return q.order_by(Room.price_weekday.asc()).first()
+
+
+def _apply_accepted_ping_pricing(ping: PingSession, db: Session) -> None:
+    """Set room_id and requested_amount (full guest total) when owner accepts."""
+    from .pricing import calculate_booking_price
+
+    room = _pick_room_for_ping_pricing(ping, db)
+    if not room:
+        logger.warning("Accepted ping %s: no room found for pricing", ping.session_id)
+        return
+    ping.room_id = room.id
+    prop = db.query(Property).filter(Property.id == ping.property_id).first()
+    if not prop:
+        return
+    try:
+        pricing = calculate_booking_price(
+            room,
+            ping.check_in,
+            ping.check_out,
+            commission_override=prop.commission_override,
+            commission_type=getattr(prop, "commission_type", None) or "percentage",
+        )
+        ping.requested_amount = pricing["total_amount"]
+    except ValueError as e:
+        logger.warning("Pricing failed for ping %s: %s", ping.session_id, e)
+
+
 def create_ping_session(
     guest_id: int,
     property_id: int,
@@ -219,6 +269,8 @@ def handle_ping_response(
     ping.status = "accepted" if action == "accept" else "rejected"
     ping.responded_at = now
     ping.owner_response_time = round(response_time, 2)
+    if action == "accept":
+        _apply_accepted_ping_pricing(ping, db)
     db.commit()
 
     # Clean up Redis
@@ -449,3 +501,22 @@ def get_bulk_ping_status(group_id: str, db: Session) -> list[PingSession]:
             db.refresh(ping)
 
     return pings
+
+
+def ping_session_to_response_dict(ping: PingSession, db: Session) -> dict:
+    """Serialize ping for API; adds total_price and flat mediator_commission for accepted pings."""
+    from ..schemas.pingSchema import PingSessionResponse
+
+    data = PingSessionResponse.model_validate(ping).model_dump(mode="json")
+    if ping.status == "accepted" and ping.requested_amount is not None:
+        data["total_price"] = float(ping.requested_amount)
+    if ping.status == "accepted" and ping.room_id:
+        room = db.query(Room).filter(Room.id == ping.room_id).first()
+        if room:
+            mc = getattr(room, "mediator_commission", None)
+            nights = max(0, (ping.check_out - ping.check_in).days)
+            if mc is not None and nights > 0:
+                data["mediator_commission"] = float(mc) * nights
+            elif mc is not None:
+                data["mediator_commission"] = float(mc)
+    return data
