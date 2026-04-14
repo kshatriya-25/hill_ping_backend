@@ -26,6 +26,7 @@
 #   commission_percentage      10      — platform fee %
 #   min_booking_amount         1       — minimum booking amount (INR)
 
+import json
 import logging
 from typing import Optional
 
@@ -33,6 +34,9 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..modals.platform_config import PlatformConfig
+
+# Keys whose values are stored as JSON arrays (not plain strings)
+LIST_KEYS = {"room_types_list", "property_types_list"}
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,10 @@ DEFAULTS = {
     "ping_ttl_seconds": str(settings.PING_TTL_SECONDS),
     "commission_percentage": str(settings.COMMISSION_PERCENTAGE),
     "min_booking_amount": "1",
+
+    # Crudable list settings (stored as JSON arrays)
+    "room_types_list": json.dumps(["single", "double", "dormitory", "suite"]),
+    "property_types_list": json.dumps(["homestay", "hotel", "cottage", "villa"]),
 
     # V2: Mediator reliability weights
     "mediator_weight_completion": "0.35",
@@ -111,6 +119,8 @@ DESCRIPTIONS = {
     "mediator_commission_tier4_rate": "Commission % for bookings > ₹10000",
     "residual_commission_rate": "Residual commission % for acquired guests on subsequent bookings",
     "residual_commission_months": "Months of residual commission eligibility after guest acquisition",
+    "room_types_list": "List of available room types (JSON array of strings)",
+    "property_types_list": "List of available property types (JSON array of strings)",
 }
 
 
@@ -173,9 +183,17 @@ def get_all_config(db: Session) -> dict:
 
     result = {}
     for key, default in DEFAULTS.items():
+        raw = _cache.get(key, default)
+        if key in LIST_KEYS:
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError):
+                value = json.loads(default)
+        else:
+            value = raw
         result[key] = {
-            "value": _cache.get(key, default),
-            "default": default,
+            "value": value,
+            "default": json.loads(default) if key in LIST_KEYS else default,
             "is_custom": key in _cache,
             "description": DESCRIPTIONS.get(key, ""),
         }

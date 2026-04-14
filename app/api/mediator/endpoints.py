@@ -295,7 +295,7 @@ def search_properties(
         if max_price:
             query = query.filter(Room.price_weekday <= max_price)
         if guests > 1:
-            query = query.filter(Room.capacity >= guests)
+            query = query.filter((Room.capacity * Room.total_rooms) >= guests)
 
     query = query.group_by(Property.id)
     query = query.order_by(distance_km.asc())

@@ -1,10 +1,13 @@
 # HillPing — Admin Dashboard endpoints
 
 import datetime
+import json
 from datetime import timezone
 from decimal import Decimal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -19,7 +22,11 @@ from ...modals.coupon import Coupon
 from ...schemas.propertySchema import PropertyListItem
 from ...schemas.reliabilitySchema import ReliabilityScoreResponse
 from ...utils.utils import require_admin
-from ...services.platform_config import get_all_config, set_config, reset_config, DEFAULTS
+from ...services.platform_config import get_all_config, set_config, reset_config, DEFAULTS, LIST_KEYS
+
+
+class ConfigUpdateBody(BaseModel):
+    value: Any
 
 router = APIRouter(tags=["admin"])
 
@@ -357,6 +364,89 @@ def unsuspend_owner(
     return {"detail": f"Owner {owner_id} unsuspended"}
 
 
+# ── Create booking from accepted ping (admin shortcut) ───────────────────────
+
+@router.post("/bookings/from-ping")
+def admin_create_booking_from_ping(
+    session_id: str = Query(..., description="Accepted ping session_id"),
+    payment_mode: str = Query(default="pay_at_property"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Admin creates a confirmed booking directly from an accepted ping session.
+    Picks the best-fit room automatically (lowest price that fits guests_count).
+    No payment required — booking is immediately confirmed.
+    """
+    from ...modals.ping import PingSession
+    from ...modals.property import Room
+    from ...services.pricing import calculate_booking_price
+    import uuid
+
+    ping = db.query(PingSession).filter(PingSession.session_id == session_id).first()
+    if not ping:
+        raise HTTPException(status_code=404, detail="Ping session not found")
+    if ping.status != "accepted":
+        raise HTTPException(status_code=400, detail="Ping is not in accepted state")
+
+    # Pick room: prefer the one on the ping, else cheapest that fits guest count
+    room = None
+    if ping.room_id:
+        room = db.query(Room).filter(Room.id == ping.room_id, Room.property_id == ping.property_id).first()
+    if not room:
+        room = (
+            db.query(Room)
+            .filter(Room.property_id == ping.property_id, Room.capacity >= ping.guests_count, Room.is_available == True)
+            .order_by(Room.price_weekday.asc())
+            .first()
+        )
+    if not room:
+        raise HTTPException(status_code=400, detail="No suitable room available for this property")
+
+    pricing = calculate_booking_price(room, ping.check_in, ping.check_out)
+
+    booking_ref = f"HP-{uuid.uuid4().hex[:6].upper()}"
+    booking = Booking(
+        booking_ref=booking_ref,
+        property_id=ping.property_id,
+        room_id=room.id,
+        guest_id=ping.guest_id,
+        owner_id=ping.owner_id,
+        mediator_id=ping.mediator_id,
+        ping_session_id=ping.id,
+        check_in=ping.check_in,
+        check_out=ping.check_out,
+        guests_count=ping.guests_count,
+        nights=pricing["nights"],
+        base_amount=pricing["base_amount"],
+        discount_amount=0,
+        service_fee=pricing["service_fee"],
+        total_amount=pricing["total_amount"],
+        status="confirmed",
+        payment_mode=payment_mode,
+        payment_status="pending",
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+
+    guest = db.query(User).filter(User.id == ping.guest_id).first()
+    prop = db.query(Property).filter(Property.id == ping.property_id).first()
+
+    return {
+        "booking_ref": booking.booking_ref,
+        "booking_id": booking.id,
+        "property_name": prop.name if prop else "",
+        "room_name": room.name,
+        "guest_name": guest.name if guest else "",
+        "total_amount": float(booking.total_amount),
+        "check_in": str(booking.check_in),
+        "check_out": str(booking.check_out),
+        "nights": booking.nights,
+        "status": booking.status,
+    }
+
+
 # ── Booking overview ──────────────────────────────────────────────────────────
 
 @router.get("/bookings")
@@ -658,35 +748,31 @@ def get_platform_config(
 @router.patch("/config/{key}")
 def update_platform_config(
     key: str,
-    value: str = Query(...),
+    body: ConfigUpdateBody,
     db: Session = Depends(getdb),
     _admin: User = Depends(require_admin),
 ):
-    """
-    Admin updates a single platform config key.
-
-    Configurable keys include:
-    - weight_acceptance, weight_response_time, weight_cancellation, weight_status_accuracy
-    - response_time_max_seconds (the "worst" response time that scores 0)
-    - instant_confirm_threshold
-    - missed_pings_warning, rejections_rank_drop, cancellations_suspension, suspension_days
-    - low_score_threshold, low_score_delist_weeks
-    - ping_ttl_seconds, commission_percentage, min_booking_amount
-    """
+    """Admin updates a single platform config key. Body: { "value": <string or array> }"""
     if key not in DEFAULTS:
         raise HTTPException(status_code=400, detail=f"Unknown config key: {key}. Valid keys: {list(DEFAULTS.keys())}")
 
-    # Validate numeric
-    try:
-        float(value)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Value must be numeric")
+    if key in LIST_KEYS:
+        if not isinstance(body.value, list):
+            raise HTTPException(status_code=400, detail="Value must be a JSON array for list config keys")
+        store_value = json.dumps(body.value)
+    else:
+        str_value = str(body.value)
+        try:
+            float(str_value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Value must be numeric")
+        store_value = str_value
 
-    record = set_config(key, value, db)
+    set_config(key, store_value, db)
     return {
         "key": key,
-        "value": value,
-        "detail": f"Config '{key}' updated to {value}",
+        "value": body.value,
+        "detail": f"Config '{key}' updated",
     }
 
 
