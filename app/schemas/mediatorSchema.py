@@ -74,6 +74,7 @@ class MediatorSearchQuery(BaseModel):
     guests: int = Field(default=1, ge=1)
     room_type: Optional[str] = None
     instant_confirm_only: bool = False
+    amenity_ids: Optional[list[int]] = Field(default=None, max_length=40)
     limit: int = Field(default=20, ge=1, le=50)
 
 

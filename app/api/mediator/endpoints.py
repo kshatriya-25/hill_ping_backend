@@ -4,8 +4,9 @@ import secrets
 import string
 import hashlib
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -251,6 +252,7 @@ def search_properties(
     guests: int = 1,
     room_type: str | None = None,
     instant_confirm_only: bool = False,
+    amenity_ids: Annotated[list[int] | None, Query()] = None,
     limit: int = 20,
     db: Session = Depends(getdb),
     current_user: User = Depends(require_role("mediator")),
@@ -258,12 +260,14 @@ def search_properties(
     """
     Search properties sorted by distance from mediator's current GPS location.
     Returns rich data: photos, price, rating, commission estimate.
+
+    When ``amenity_ids`` is set (repeat query param), only properties that have
+    **every** listed amenity are returned (AND).
     """
-    from ...modals.property import Property, Room, PropertyPhoto
+    from ...modals.property import Property, Room, PropertyPhoto, PropertyAmenity
     from ...modals.review import Review
     from ...services.platform_config import get_config
-    from sqlalchemy import func
-    import math
+    from sqlalchemy import func, exists
 
     # Haversine distance approximation in SQL (returns km)
     dlat = func.radians(Property.latitude - latitude)
@@ -287,6 +291,16 @@ def search_properties(
 
     if instant_confirm_only:
         query = query.filter(Property.is_instant_confirm == True)
+
+    if amenity_ids:
+        distinct_amenity_ids = list(dict.fromkeys(amenity_ids))[:40]
+        for aid in distinct_amenity_ids:
+            query = query.filter(
+                exists().where(
+                    PropertyAmenity.property_id == Property.id,
+                    PropertyAmenity.amenity_id == aid,
+                )
+            )
 
     # Filter by distance
     query = query.having(distance_km <= max_distance_km)
