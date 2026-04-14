@@ -290,12 +290,24 @@ def search_properties(
     # Filter by price range (join rooms to check price)
     if min_price or max_price or guests > 1:
         query = query.join(Room, Room.property_id == Property.id)
+        if hasattr(Room, "mediator_commission") and hasattr(Room, "platform_fee"):
+            guest_weekday_floor = (
+                Room.price_weekday
+                + func.coalesce(Room.mediator_commission, 0)
+                + func.coalesce(Room.platform_fee, 0)
+            )
+        else:
+            guest_weekday_floor = Room.price_weekday
         if min_price:
-            query = query.filter(Room.price_weekday >= min_price)
+            query = query.filter(guest_weekday_floor >= min_price)
         if max_price:
-            query = query.filter(Room.price_weekday <= max_price)
+            query = query.filter(guest_weekday_floor <= max_price)
         if guests > 1:
-            query = query.filter((Room.capacity * Room.total_rooms) >= guests)
+            # total_rooms exists after model+migration; fall back for older deployments
+            if hasattr(Room, "total_rooms"):
+                query = query.filter((Room.capacity * Room.total_rooms) >= guests)
+            else:
+                query = query.filter(Room.capacity >= guests)
 
     query = query.group_by(Property.id)
     query = query.order_by(distance_km.asc())
@@ -327,7 +339,9 @@ def search_properties(
     for prop, dist in results:
         # Get rooms for price info
         rooms = db.query(Room).filter(Room.property_id == prop.id).all()
-        price_min = min((r.price_weekday for r in rooms), default=None) if rooms else None
+        from ...services.pricing import room_min_guest_nightly
+
+        price_min = min((room_min_guest_nightly(r) for r in rooms), default=None) if rooms else None
         rooms_count = len(rooms)
 
         # Get photos

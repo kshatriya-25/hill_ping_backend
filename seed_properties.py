@@ -166,6 +166,7 @@ def seed():
                     name=f"{rt['name']} {j+1}" if num_rooms > 1 else rt["name"],
                     room_type=rt["type"],
                     capacity=rt["cap"],
+                    total_rooms=1,
                     price_weekday=weekday_price,
                     price_weekend=weekend_price,
                     is_available=True,

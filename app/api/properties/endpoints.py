@@ -16,6 +16,7 @@ from ...schemas.propertySchema import (
     StatusUpdate, RoomCreate, RoomUpdate, RoomResponse,
     PropertyPhotoResponse, DateBlockCreate, DateBlockResponse,
 )
+from ...services.pricing import room_min_guest_nightly
 from ...core.config import settings
 from ...utils.utils import get_current_user, require_owner, require_admin, require_role
 
@@ -58,9 +59,12 @@ def _build_list_item(
     cover = db.query(PropertyPhoto).filter(
         PropertyPhoto.property_id == prop.id, PropertyPhoto.is_cover == True
     ).first()
-    min_price = db.query(func.min(Room.price_weekday)).filter(
+    rooms_avail = db.query(Room).filter(
         Room.property_id == prop.id, Room.is_available == True
-    ).scalar()
+    ).all()
+    min_price = None
+    if rooms_avail:
+        min_price = min(room_min_guest_nightly(r) for r in rooms_avail)
     rooms_count = db.query(func.count(Room.id)).filter(
         Room.property_id == prop.id
     ).scalar() or 0
@@ -204,13 +208,16 @@ def check_availability(
         ).first()
 
         if not blocked:
+            from ...services.pricing import room_flat_extras_per_night
+
+            extras_f = float(room_flat_extras_per_night(room))
             available_rooms.append({
                 "id": room.id,
                 "name": room.name,
                 "room_type": room.room_type,
                 "capacity": room.capacity,
-                "price_weekday": float(room.price_weekday),
-                "price_weekend": float(room.price_weekend),
+                "price_weekday": float(room.price_weekday) + extras_f,
+                "price_weekend": float(room.price_weekend) + extras_f,
             })
 
     if not available_rooms:
@@ -264,10 +271,15 @@ def list_properties(
     # Filter by room price/capacity
     if price_min is not None or price_max is not None or guests is not None:
         room_q = db.query(Room.property_id).filter(Room.is_available == True)
+        guest_weekday_floor = (
+            Room.price_weekday
+            + func.coalesce(Room.mediator_commission, 0)
+            + func.coalesce(Room.platform_fee, 0)
+        )
         if price_min is not None:
-            room_q = room_q.filter(Room.price_weekday >= price_min)
+            room_q = room_q.filter(guest_weekday_floor >= price_min)
         if price_max is not None:
-            room_q = room_q.filter(Room.price_weekday <= price_max)
+            room_q = room_q.filter(guest_weekday_floor <= price_max)
         if guests is not None:
             room_q = room_q.filter(Room.capacity >= guests)
         matching_ids = [r.property_id for r in room_q.distinct().all()]
@@ -281,7 +293,12 @@ def list_properties(
         q = q.filter(Property.latitude.isnot(None), Property.longitude.isnot(None))
 
         if sort_by == "price":
-            q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(Room.price_weekday).asc())
+            guest_floor = (
+                Room.price_weekday
+                + func.coalesce(Room.mediator_commission, 0)
+                + func.coalesce(Room.platform_fee, 0)
+            )
+            q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(guest_floor).asc())
         else:
             q = q.order_by(Property.created_at.desc())
 
@@ -305,7 +322,12 @@ def list_properties(
 
     # Standard sort (no distance)
     if sort_by == "price":
-        q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(Room.price_weekday).asc())
+        guest_floor = (
+            Room.price_weekday
+            + func.coalesce(Room.mediator_commission, 0)
+            + func.coalesce(Room.platform_fee, 0)
+        )
+        q = q.outerjoin(Room).group_by(Property.id).order_by(func.min(guest_floor).asc())
     else:
         q = q.order_by(Property.created_at.desc())
 

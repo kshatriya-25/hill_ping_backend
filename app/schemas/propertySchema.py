@@ -30,16 +30,24 @@ class RoomCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     room_type: str = Field(default="double", pattern=r'^(single|double|dormitory|suite)$')
     capacity: int = Field(default=2, ge=1, le=50)
+    total_rooms: int = Field(default=1, ge=1, le=500)
     price_weekday: Decimal = Field(..., ge=0)
     price_weekend: Decimal = Field(..., ge=0)
+    weekend_days: Optional[list[str]] = Field(default=None)
+    mediator_commission: Optional[Decimal] = Field(default=None, ge=0)
+    platform_fee: Optional[Decimal] = Field(default=None, ge=0)
 
 
 class RoomUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     room_type: Optional[str] = Field(default=None, pattern=r'^(single|double|dormitory|suite)$')
     capacity: Optional[int] = Field(default=None, ge=1, le=50)
+    total_rooms: Optional[int] = Field(default=None, ge=1, le=500)
     price_weekday: Optional[Decimal] = Field(default=None, ge=0)
     price_weekend: Optional[Decimal] = Field(default=None, ge=0)
+    weekend_days: Optional[list[str]] = None
+    mediator_commission: Optional[Decimal] = Field(default=None, ge=0)
+    platform_fee: Optional[Decimal] = Field(default=None, ge=0)
     is_available: Optional[bool] = None
 
 
@@ -48,8 +56,12 @@ class RoomResponse(BaseModel):
     name: str
     room_type: str
     capacity: int
+    total_rooms: int = 1
     price_weekday: Decimal
     price_weekend: Decimal
+    weekend_days: Optional[list[str]] = None
+    mediator_commission: Optional[Decimal] = None
+    platform_fee: Optional[Decimal] = None
     is_available: bool
 
     model_config = {"from_attributes": True}

@@ -2,7 +2,7 @@
 
 import datetime
 from sqlalchemy import (
-    Column, Integer, String, Float, Numeric, Boolean, Text,
+    Column, Integer, String, Float, Numeric, Boolean, Text, JSON,
     ForeignKey, DateTime, Date, UniqueConstraint, Index,
 )
 from sqlalchemy.orm import relationship
@@ -93,8 +93,12 @@ class Room(Base):
     name = Column(String(100), nullable=False)
     room_type = Column(String(30), nullable=False, default="double")  # single, double, dormitory, suite
     capacity = Column(Integer, nullable=False, default=2)
+    total_rooms = Column(Integer, nullable=False, default=1)
     price_weekday = Column(Numeric(10, 2), nullable=False)
     price_weekend = Column(Numeric(10, 2), nullable=False)
+    weekend_days = Column(JSON, nullable=True)
+    mediator_commission = Column(Numeric(10, 2), nullable=True)
+    platform_fee = Column(Numeric(10, 2), nullable=True)
     is_available = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(

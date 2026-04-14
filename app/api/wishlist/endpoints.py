@@ -2,8 +2,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-
 from ...database.session import getdb
 from ...modals.masters import User
 from ...modals.property import Property, PropertyPhoto, Room
@@ -75,9 +73,12 @@ def list_wishlist(
         cover = db.query(PropertyPhoto).filter(
             PropertyPhoto.property_id == prop.id, PropertyPhoto.is_cover == True
         ).first()
-        min_price = db.query(func.min(Room.price_weekday)).filter(
+        from ...services.pricing import room_min_guest_nightly
+
+        rooms_avail = db.query(Room).filter(
             Room.property_id == prop.id, Room.is_available == True
-        ).scalar()
+        ).all()
+        min_price = min((room_min_guest_nightly(r) for r in rooms_avail), default=None) if rooms_avail else None
         result.append({
             "id": prop.id,
             "name": prop.name,
@@ -88,7 +89,7 @@ def list_wishlist(
             "is_verified": prop.is_verified,
             "is_instant_confirm": prop.is_instant_confirm,
             "cover_photo": cover.url if cover else None,
-            "price_min": float(min_price) if min_price else None,
+            "price_min": float(min_price) if min_price is not None else None,
             "rating_avg": None,
             "owner_name": prop.owner.name if prop.owner else None,
             "latitude": prop.latitude,

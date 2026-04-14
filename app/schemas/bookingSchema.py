@@ -39,6 +39,8 @@ class PriceBreakdownItem(BaseModel):
     date: str
     type: str
     price: Decimal
+    owner_price: Optional[Decimal] = None
+    extras: Optional[Decimal] = None
 
 
 class PriceQuote(BaseModel):

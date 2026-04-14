@@ -23,6 +23,7 @@ from ...schemas.propertySchema import PropertyListItem
 from ...schemas.reliabilitySchema import ReliabilityScoreResponse
 from ...utils.utils import require_admin
 from ...services.platform_config import get_all_config, set_config, reset_config, DEFAULTS, LIST_KEYS
+from ...services.pricing import room_min_guest_nightly
 
 
 class ConfigUpdateBody(BaseModel):
@@ -140,8 +141,8 @@ def admin_list_properties(
     for p in properties:
         # Rooms summary
         rooms = db.query(Room).filter(Room.property_id == p.id).all()
-        min_price = min((float(r.price_weekday) for r in rooms), default=None)
-        total_capacity = sum(r.capacity for r in rooms)
+        min_price = min((float(room_min_guest_nightly(r)) for r in rooms), default=None) if rooms else None
+        total_capacity = sum(r.capacity * (getattr(r, "total_rooms", None) or 1) for r in rooms)
 
         # Photos
         photos = db.query(PropertyPhoto).filter(PropertyPhoto.property_id == p.id).order_by(PropertyPhoto.display_order).all()
@@ -188,8 +189,20 @@ def admin_list_properties(
                     "name": r.name,
                     "room_type": r.room_type,
                     "capacity": r.capacity,
+                    "total_rooms": getattr(r, "total_rooms", None) or 1,
                     "price_weekday": float(r.price_weekday),
                     "price_weekend": float(r.price_weekend),
+                    "weekend_days": getattr(r, "weekend_days", None),
+                    "mediator_commission": (
+                        float(mc)
+                        if (mc := getattr(r, "mediator_commission", None)) is not None
+                        else None
+                    ),
+                    "platform_fee": (
+                        float(pf)
+                        if (pf := getattr(r, "platform_fee", None)) is not None
+                        else None
+                    ),
                     "is_available": r.is_available,
                 }
                 for r in rooms
@@ -394,16 +407,28 @@ def admin_create_booking_from_ping(
     if ping.room_id:
         room = db.query(Room).filter(Room.id == ping.room_id, Room.property_id == ping.property_id).first()
     if not room:
+        guest_floor = (
+            Room.price_weekday
+            + func.coalesce(Room.mediator_commission, 0)
+            + func.coalesce(Room.platform_fee, 0)
+        )
         room = (
             db.query(Room)
             .filter(Room.property_id == ping.property_id, Room.capacity >= ping.guests_count, Room.is_available == True)
-            .order_by(Room.price_weekday.asc())
+            .order_by(guest_floor.asc())
             .first()
         )
     if not room:
         raise HTTPException(status_code=400, detail="No suitable room available for this property")
 
-    pricing = calculate_booking_price(room, ping.check_in, ping.check_out)
+    prop = db.query(Property).filter(Property.id == ping.property_id).first()
+    pricing = calculate_booking_price(
+        room,
+        ping.check_in,
+        ping.check_out,
+        commission_override=prop.commission_override if prop else None,
+        commission_type=getattr(prop, "commission_type", None) or "percentage",
+    )
 
     booking_ref = f"HP-{uuid.uuid4().hex[:6].upper()}"
     booking = Booking(

@@ -153,8 +153,6 @@ def compare_properties(
 
     from ...modals.tour import TourStop
     from ...modals.property import Property, Room
-    from sqlalchemy import func
-
     stops = db.query(TourStop).filter(
         TourStop.tour_id == card.tour_session_id,
     ).order_by(TourStop.stop_index).all()
@@ -165,15 +163,18 @@ def compare_properties(
         if not prop:
             continue
 
-        min_price = db.query(func.min(Room.price_weekday)).filter(
+        from ...services.pricing import room_min_guest_nightly
+
+        rooms_avail = db.query(Room).filter(
             Room.property_id == prop.id, Room.is_available == True,
-        ).scalar()
+        ).all()
+        min_price = min((room_min_guest_nightly(r) for r in rooms_avail), default=None) if rooms_avail else None
 
         comparisons.append({
             "property_id": prop.id,
             "name": prop.name,
             "property_type": prop.property_type,
-            "price_from": float(min_price) if min_price else None,
+            "price_from": float(min_price) if min_price is not None else None,
             "address": prop.address,
             "stop_index": stop.stop_index,
             "visit_status": stop.status,

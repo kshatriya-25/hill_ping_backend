@@ -69,8 +69,14 @@ def initiate_booking(
         if not ping:
             raise HTTPException(status_code=400, detail="No accepted ping session found")
 
-    # Calculate price
-    pricing = calculate_booking_price(room, data.check_in, data.check_out)
+    # Calculate price (per-property commission; nightly guest total incl. room fees)
+    pricing = calculate_booking_price(
+        room,
+        data.check_in,
+        data.check_out,
+        commission_override=prop.commission_override,
+        commission_type=getattr(prop, "commission_type", None) or "percentage",
+    )
 
     # TODO: Apply coupon if provided (Phase 8)
     discount = Decimal("0")
@@ -171,6 +177,8 @@ def get_price_quote(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
+    prop = db.query(Property).filter(Property.id == room.property_id).first()
+
     from datetime import date as date_type
     try:
         ci = date_type.fromisoformat(check_in)
@@ -179,7 +187,13 @@ def get_price_quote(
         raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
 
     try:
-        pricing = calculate_booking_price(room, ci, co)
+        pricing = calculate_booking_price(
+            room,
+            ci,
+            co,
+            commission_override=prop.commission_override if prop else None,
+            commission_type=getattr(prop, "commission_type", None) or "percentage",
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
