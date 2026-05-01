@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import case, func
 
 from ...database.session import getdb
 from ...modals.masters import User
@@ -1499,9 +1499,9 @@ def analytics_top_properties(
     except ValueError:
         raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
 
-    accepted_col = func.sum(func.case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
-    rejected_col = func.sum(func.case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
-    expired_col = func.sum(func.case((PingSession.status == "expired", 1), else_=0)).label("expired")
+    accepted_col = func.sum(case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
+    rejected_col = func.sum(case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
+    expired_col = func.sum(case((PingSession.status == "expired", 1), else_=0)).label("expired")
     total_col = func.count(PingSession.id).label("total")
     avg_response_col = func.avg(PingSession.owner_response_time).label("avg_response")
 
@@ -1569,11 +1569,11 @@ def analytics_missed_pings(
     except ValueError:
         raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
 
-    rejected_col = func.sum(func.case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
-    expired_col = func.sum(func.case((PingSession.status == "expired", 1), else_=0)).label("expired")
-    accepted_col = func.sum(func.case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
+    rejected_col = func.sum(case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
+    expired_col = func.sum(case((PingSession.status == "expired", 1), else_=0)).label("expired")
+    accepted_col = func.sum(case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
     missed_col = func.sum(
-        func.case((PingSession.status.in_(("rejected", "expired")), 1), else_=0)
+        case((PingSession.status.in_(("rejected", "expired")), 1), else_=0)
     ).label("missed")
     total_col = func.count(PingSession.id).label("total")
 
@@ -1638,7 +1638,7 @@ def analytics_response_time_histogram(
 
     # Bucket boundaries (seconds): 0-5, 5-10, 10-30, 30-60, 60+
     rt = PingSession.owner_response_time
-    bucket_expr = func.case(
+    bucket_expr = case(
         (rt < 5, "0-5s"),
         (rt < 10, "5-10s"),
         (rt < 30, "10-30s"),
