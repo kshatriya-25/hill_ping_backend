@@ -86,7 +86,7 @@ class Settings:
 
     # ── V2: Mediator platform settings ─────────────────────────────────────────
     VISIT_HOLD_TTL_SECONDS: int = int(os.getenv("VISIT_HOLD_TTL_SECONDS", "2700"))  # 45 minutes
-    MAX_BULK_PING: int = int(os.getenv("MAX_BULK_PING", "3"))
+    MAX_BULK_PING: int = int(os.getenv("MAX_BULK_PING", "100"))
     MAX_TOUR_STOPS: int = int(os.getenv("MAX_TOUR_STOPS", "3"))
     GUEST_ACCESS_CODE_VALIDITY_HOURS: int = int(os.getenv("GUEST_ACCESS_CODE_VALIDITY_HOURS", "24"))
     RESIDUAL_COMMISSION_MONTHS: int = int(os.getenv("RESIDUAL_COMMISSION_MONTHS", "12"))

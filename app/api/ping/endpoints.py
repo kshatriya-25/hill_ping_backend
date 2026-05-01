@@ -63,7 +63,9 @@ def _notify_guest_bg(guest_id: int, event_data: dict):
 def _notify_admins_bg(ping_id: int):
     """
     Background task: notify all admin users when a mediator-initiated ping is accepted.
-    Sends property, mediator, guest details (including phone numbers) via WebSocket + FCM.
+    Sends property, mediator, guest details (including phone numbers) and a price
+    breakdown (owner price, mediator commission, platform fee, service fee, total)
+    via WebSocket + FCM.
     """
     db = SessionLocal()
     try:
@@ -78,6 +80,48 @@ def _notify_admins_bg(ping_id: int):
         owner = db.query(User).filter(User.id == ping.owner_id).first()
 
         g_name, g_phone = effective_guest_name_phone_for_mediator_ping(ping, guest)
+
+        # ── Price breakdown ───────────────────────────────────────────────────
+        # Recompute from the room locked in by _apply_accepted_ping_pricing so admin
+        # sees the exact split: owner rack subtotal + per-night mediator commission +
+        # per-night platform fee + service fee (% on owner subtotal).
+        from ...modals.property import Room
+        from ...services.pricing import calculate_booking_price
+
+        breakdown_summary = {
+            "nights": 0,
+            "owner_subtotal": 0.0,           # sum(room.price_weekday|weekend) across nights
+            "mediator_commission_total": 0.0, # room.mediator_commission * nights
+            "platform_fee_total": 0.0,        # room.platform_fee * nights
+            "service_fee": 0.0,               # platform commission % on owner_subtotal
+            "total_amount": 0.0,              # full guest total = base + service_fee
+        }
+        room = db.query(Room).filter(Room.id == ping.room_id).first() if ping.room_id else None
+        if room and prop:
+            try:
+                pricing = calculate_booking_price(
+                    room,
+                    ping.check_in,
+                    ping.check_out,
+                    commission_override=prop.commission_override,
+                    commission_type=getattr(prop, "commission_type", None) or "percentage",
+                )
+                nights = pricing["nights"]
+                # base_amount = owner_subtotal + (mediator_commission + platform_fee) * nights
+                # We re-derive the owner subtotal by walking the per-night breakdown.
+                owner_subtotal = sum(float(b["owner_price"]) for b in pricing["breakdown"])
+                mc_per_night = float(getattr(room, "mediator_commission", 0) or 0)
+                pf_per_night = float(getattr(room, "platform_fee", 0) or 0)
+                breakdown_summary = {
+                    "nights": nights,
+                    "owner_subtotal": round(owner_subtotal, 2),
+                    "mediator_commission_total": round(mc_per_night * nights, 2),
+                    "platform_fee_total": round(pf_per_night * nights, 2),
+                    "service_fee": round(float(pricing["service_fee"]), 2),
+                    "total_amount": round(float(pricing["total_amount"]), 2),
+                }
+            except Exception as e:
+                _logger.warning("Admin breakdown computation failed for ping %d: %s", ping_id, e)
 
         admin_msg = {
             "type": "mediator_ping_accepted",
@@ -98,6 +142,13 @@ def _notify_admins_bg(ping_id: int):
             "check_out": str(ping.check_out),
             "guests_count": ping.guests_count,
             "response_time_seconds": ping.owner_response_time,
+            # Price breakdown — added 2026-05; admin clients display these.
+            "nights": breakdown_summary["nights"],
+            "owner_subtotal": breakdown_summary["owner_subtotal"],
+            "mediator_commission_total": breakdown_summary["mediator_commission_total"],
+            "platform_fee_total": breakdown_summary["platform_fee_total"],
+            "service_fee": breakdown_summary["service_fee"],
+            "total_amount": breakdown_summary["total_amount"],
         }
 
         # Find all admin users
@@ -128,13 +179,25 @@ def _notify_admins_bg(ping_id: int):
 
         fcm_flat = {k: _fcm_val(v) for k, v in admin_msg.items()}
 
+        # One-line price summary for the FCM body — only when we have a real total.
+        total = breakdown_summary["total_amount"]
+        if total > 0:
+            money_line = (
+                f" · Total ₹{int(round(total))} "
+                f"(Owner ₹{int(round(breakdown_summary['owner_subtotal']))}, "
+                f"Mediator ₹{int(round(breakdown_summary['mediator_commission_total']))}, "
+                f"Platform ₹{int(round(breakdown_summary['platform_fee_total'] + breakdown_summary['service_fee']))})"
+            )
+        else:
+            money_line = ""
+
         for admin in admins:
             send_push_to_user(
                 user_id=admin.id,
                 title="Mediator Booking Match!",
                 body=(
                     f"{mediator_name} matched {guest_label}{guest_phone_bit} "
-                    f"with {prop_name}. Check-in: {ping.check_in}"
+                    f"with {prop_name}. Check-in: {ping.check_in}{money_line}"
                 ),
                 data=fcm_flat,
                 db=db,
@@ -297,12 +360,18 @@ def my_pending_pings(
 @router.get("/my-history")
 def my_ping_history(
     status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     skip: int = 0,
     limit: int = 30,
     db: Session = Depends(getdb),
     current_user: User = Depends(require_role("owner", "mediator")),
 ):
-    """Owner or mediator views their ping history with optional status filter."""
+    """
+    Owner or mediator views their ping history.
+    Optional filters: status, date_from / date_to (ISO YYYY-MM-DD on created_at).
+    """
+    import datetime as _dt
     q = db.query(PingSessionModel)
 
     if current_user.role == "owner":
@@ -312,6 +381,20 @@ def my_ping_history(
 
     if status:
         q = q.filter(PingSessionModel.status == status)
+
+    if date_from:
+        try:
+            df = _dt.date.fromisoformat(date_from)
+            q = q.filter(PingSessionModel.created_at >= _dt.datetime.combine(df, _dt.time.min))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date_from must be YYYY-MM-DD")
+    if date_to:
+        try:
+            dt_end = _dt.date.fromisoformat(date_to)
+            # Inclusive: filter < (date_to + 1 day) so the whole day is included.
+            q = q.filter(PingSessionModel.created_at < _dt.datetime.combine(dt_end + _dt.timedelta(days=1), _dt.time.min))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date_to must be YYYY-MM-DD")
 
     total = q.count()
     pings = q.order_by(PingSessionModel.created_at.desc()).offset(skip).limit(limit).all()
