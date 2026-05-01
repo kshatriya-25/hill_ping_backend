@@ -1321,3 +1321,341 @@ def mediator_commission_report(
         "by_type": by_type,
         "active_mediators": active_mediators,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Analytics — read-only aggregations for the admin SaaS dashboard.
+# All endpoints are admin-gated, accept optional date_from / date_to (ISO date),
+# and are pure aggregation: no model or response-shape changes elsewhere.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _parse_date_range(
+    date_from: str | None,
+    date_to: str | None,
+    default_days: int = 30,
+) -> tuple[datetime.datetime, datetime.datetime]:
+    """Parse YYYY-MM-DD strings into UTC datetimes covering the inclusive range.
+    Defaults to the last `default_days` days when nothing is provided."""
+    today = datetime.date.today()
+    df = (
+        datetime.date.fromisoformat(date_from)
+        if date_from
+        else today - datetime.timedelta(days=default_days - 1)
+    )
+    dt = datetime.date.fromisoformat(date_to) if date_to else today
+    if dt < df:
+        df, dt = dt, df
+    start = datetime.datetime.combine(df, datetime.time.min)
+    end = datetime.datetime.combine(dt + datetime.timedelta(days=1), datetime.time.min)
+    return start, end
+
+
+def _ping_status_counts(db: Session, start, end) -> dict:
+    """Single GROUP BY query for status counts in [start, end)."""
+    rows = (
+        db.query(PingSession.status, func.count(PingSession.id))
+        .filter(PingSession.created_at >= start, PingSession.created_at < end)
+        .group_by(PingSession.status)
+        .all()
+    )
+    return {status or "unknown": int(count) for status, count in rows}
+
+
+@router.get("/analytics/overview")
+def analytics_overview(
+    date_from: str | None = Query(None, description="ISO date YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="ISO date YYYY-MM-DD"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """KPI cards: ping counts, acceptance rate, response time, bookings, revenue,
+    plus the same metrics for the prior period of equal length for delta deltas."""
+    try:
+        start, end = _parse_date_range(date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
+
+    span = end - start
+    prev_start = start - span
+    prev_end = start
+
+    def metrics(s, e):
+        counts = _ping_status_counts(db, s, e)
+        total = sum(counts.values())
+        accepted = counts.get("accepted", 0)
+        rejected = counts.get("rejected", 0)
+        expired = counts.get("expired", 0)
+        pending = counts.get("pending", 0)
+        responded = accepted + rejected
+        avg_response = (
+            db.query(func.avg(PingSession.owner_response_time))
+            .filter(
+                PingSession.created_at >= s,
+                PingSession.created_at < e,
+                PingSession.owner_response_time.isnot(None),
+            )
+            .scalar()
+        )
+        bookings = (
+            db.query(func.count(Booking.id))
+            .filter(Booking.created_at >= s, Booking.created_at < e)
+            .scalar()
+        ) or 0
+        revenue = (
+            db.query(func.coalesce(func.sum(Booking.total_amount), 0))
+            .filter(
+                Booking.created_at >= s,
+                Booking.created_at < e,
+                Booking.payment_status == "captured",
+            )
+            .scalar()
+        ) or 0
+        return {
+            "total_pings": total,
+            "accepted": accepted,
+            "rejected": rejected,
+            "expired": expired,
+            "pending": pending,
+            "missed": rejected + expired,  # what mediators/admins call "missed"
+            "acceptance_rate": round((accepted / responded) * 100, 1) if responded else 0.0,
+            "avg_response_seconds": round(float(avg_response), 1) if avg_response else None,
+            "total_bookings": int(bookings),
+            "total_revenue": float(revenue),
+        }
+
+    current = metrics(start, end)
+    previous = metrics(prev_start, prev_end)
+
+    return {
+        "range": {"from": start.date().isoformat(), "to": (end - datetime.timedelta(days=1)).date().isoformat()},
+        "current": current,
+        "previous": previous,
+    }
+
+
+@router.get("/analytics/timeseries")
+def analytics_timeseries(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    granularity: str = Query("day", pattern="^(day|week)$"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Per-day (or per-week) ping totals split by status, for line/area charts."""
+    try:
+        start, end = _parse_date_range(date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
+
+    bucket = func.date_trunc(granularity, PingSession.created_at).label("bucket")
+    rows = (
+        db.query(bucket, PingSession.status, func.count(PingSession.id))
+        .filter(PingSession.created_at >= start, PingSession.created_at < end)
+        .group_by(bucket, PingSession.status)
+        .order_by(bucket)
+        .all()
+    )
+
+    series: dict[str, dict[str, int]] = {}
+    for b, status, count in rows:
+        key = b.date().isoformat() if hasattr(b, "date") else str(b)
+        node = series.setdefault(key, {"date": key, "accepted": 0, "rejected": 0, "expired": 0, "pending": 0, "total": 0})
+        if status in node:
+            node[status] = int(count)
+        node["total"] += int(count)
+
+    # Fill empty buckets so the chart x-axis is continuous
+    points: list[dict] = []
+    cur = start
+    step = datetime.timedelta(days=7 if granularity == "week" else 1)
+    while cur < end:
+        # Align week start to Monday for week granularity (date_trunc('week', …) → Monday in Postgres)
+        if granularity == "week":
+            week_start = cur - datetime.timedelta(days=cur.weekday())
+            key = week_start.date().isoformat()
+        else:
+            key = cur.date().isoformat()
+        if key not in series:
+            series[key] = {"date": key, "accepted": 0, "rejected": 0, "expired": 0, "pending": 0, "total": 0}
+        cur += step
+
+    points = sorted(series.values(), key=lambda x: x["date"])
+    return {"granularity": granularity, "points": points}
+
+
+@router.get("/analytics/top-properties")
+def analytics_top_properties(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    sort_by: str = Query("accepted", pattern="^(accepted|acceptance_rate|total_pings)$"),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Top properties by acceptance count, acceptance rate, or volume."""
+    try:
+        start, end = _parse_date_range(date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
+
+    accepted_col = func.sum(func.case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
+    rejected_col = func.sum(func.case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
+    expired_col = func.sum(func.case((PingSession.status == "expired", 1), else_=0)).label("expired")
+    total_col = func.count(PingSession.id).label("total")
+    avg_response_col = func.avg(PingSession.owner_response_time).label("avg_response")
+
+    rows = (
+        db.query(
+            Property.id,
+            Property.name,
+            Property.city,
+            User.name.label("owner_name"),
+            total_col,
+            accepted_col,
+            rejected_col,
+            expired_col,
+            avg_response_col,
+        )
+        .join(PingSession, PingSession.property_id == Property.id)
+        .outerjoin(User, User.id == Property.owner_id)
+        .filter(PingSession.created_at >= start, PingSession.created_at < end)
+        .group_by(Property.id, Property.name, Property.city, User.name)
+        .all()
+    )
+
+    items = []
+    for r in rows:
+        total = int(r.total or 0)
+        accepted = int(r.accepted or 0)
+        rejected = int(r.rejected or 0)
+        expired = int(r.expired or 0)
+        responded = accepted + rejected
+        items.append({
+            "property_id": r.id,
+            "property_name": r.name,
+            "city": r.city or "",
+            "owner_name": r.owner_name or "—",
+            "total_pings": total,
+            "accepted": accepted,
+            "rejected": rejected,
+            "expired": expired,
+            "missed": rejected + expired,
+            "acceptance_rate": round((accepted / responded) * 100, 1) if responded else 0.0,
+            "avg_response_seconds": round(float(r.avg_response), 1) if r.avg_response else None,
+        })
+
+    if sort_by == "acceptance_rate":
+        items.sort(key=lambda x: (x["acceptance_rate"], x["accepted"]), reverse=True)
+    elif sort_by == "total_pings":
+        items.sort(key=lambda x: x["total_pings"], reverse=True)
+    else:  # "accepted"
+        items.sort(key=lambda x: x["accepted"], reverse=True)
+
+    return {"items": items[:limit]}
+
+
+@router.get("/analytics/missed-pings")
+def analytics_missed_pings(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """Properties with the most missed (rejected + expired) pings — 'who's leaking demand'."""
+    try:
+        start, end = _parse_date_range(date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
+
+    rejected_col = func.sum(func.case((PingSession.status == "rejected", 1), else_=0)).label("rejected")
+    expired_col = func.sum(func.case((PingSession.status == "expired", 1), else_=0)).label("expired")
+    accepted_col = func.sum(func.case((PingSession.status == "accepted", 1), else_=0)).label("accepted")
+    missed_col = func.sum(
+        func.case((PingSession.status.in_(("rejected", "expired")), 1), else_=0)
+    ).label("missed")
+    total_col = func.count(PingSession.id).label("total")
+
+    rows = (
+        db.query(
+            Property.id,
+            Property.name,
+            Property.city,
+            User.name.label("owner_name"),
+            User.phone.label("owner_phone"),
+            total_col,
+            accepted_col,
+            rejected_col,
+            expired_col,
+            missed_col,
+        )
+        .join(PingSession, PingSession.property_id == Property.id)
+        .outerjoin(User, User.id == Property.owner_id)
+        .filter(PingSession.created_at >= start, PingSession.created_at < end)
+        .group_by(Property.id, Property.name, Property.city, User.name, User.phone)
+        .having(missed_col > 0)
+        .order_by(missed_col.desc())
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for r in rows:
+        total = int(r.total or 0)
+        accepted = int(r.accepted or 0)
+        rejected = int(r.rejected or 0)
+        expired = int(r.expired or 0)
+        missed = int(r.missed or 0)
+        items.append({
+            "property_id": r.id,
+            "property_name": r.name,
+            "city": r.city or "",
+            "owner_name": r.owner_name or "—",
+            "owner_phone": r.owner_phone or "",
+            "total_pings": total,
+            "accepted": accepted,
+            "rejected": rejected,
+            "expired": expired,
+            "missed": missed,
+            "miss_rate": round((missed / total) * 100, 1) if total else 0.0,
+        })
+    return {"items": items}
+
+
+@router.get("/analytics/response-time-histogram")
+def analytics_response_time_histogram(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """How fast owners respond, bucketed for a histogram chart."""
+    try:
+        start, end = _parse_date_range(date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date format; use YYYY-MM-DD")
+
+    # Bucket boundaries (seconds): 0-5, 5-10, 10-30, 30-60, 60+
+    rt = PingSession.owner_response_time
+    bucket_expr = func.case(
+        (rt < 5, "0-5s"),
+        (rt < 10, "5-10s"),
+        (rt < 30, "10-30s"),
+        (rt < 60, "30-60s"),
+        else_="60s+",
+    ).label("bucket")
+
+    rows = (
+        db.query(bucket_expr, func.count(PingSession.id))
+        .filter(
+            PingSession.created_at >= start,
+            PingSession.created_at < end,
+            rt.isnot(None),
+        )
+        .group_by(bucket_expr)
+        .all()
+    )
+    counts = {b: int(c) for b, c in rows}
+    order = ["0-5s", "5-10s", "10-30s", "30-60s", "60s+"]
+    return {"buckets": [{"bucket": b, "count": counts.get(b, 0)} for b in order]}
