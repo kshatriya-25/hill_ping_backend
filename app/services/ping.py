@@ -132,11 +132,12 @@ def create_ping_session(
         raise PingError("Property owner is unavailable")
 
     # Check if owner is suspended
-    score = db.query(OwnerReliabilityScore).filter(
-        OwnerReliabilityScore.owner_id == prop.owner_id
-    ).first()
-    if score and score.is_suspended:
-        raise PingError("This property is temporarily unavailable")
+    # Temporarily disabled — owner reliability suspension check
+    # score = db.query(OwnerReliabilityScore).filter(
+    #     OwnerReliabilityScore.owner_id == prop.owner_id
+    # ).first()
+    # if score and score.is_suspended:
+    #     raise PingError("This property is temporarily unavailable")
 
     # ── Validate room if specified ────────────────────────────────────────
     if room_id:
