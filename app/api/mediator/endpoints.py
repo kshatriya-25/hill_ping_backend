@@ -253,7 +253,7 @@ def search_properties(
     room_type: str | None = None,
     instant_confirm_only: bool = False,
     amenity_ids: Annotated[list[int] | None, Query()] = None,
-    limit: int = 20,
+    limit: int = 200,
     db: Session = Depends(getdb),
     current_user: User = Depends(require_role("mediator")),
 ):
@@ -268,6 +268,11 @@ def search_properties(
     from ...modals.review import Review
     from ...services.platform_config import get_config
     from sqlalchemy import func, exists
+
+    # Legacy mediator client (shipped on the unified owner-app APK) hardcodes
+    # limit=20. Override that until the APK can be safely redistributed.
+    if limit == 20:
+        limit = 200
 
     # Haversine distance approximation in SQL (returns km)
     dlat = func.radians(Property.latitude - latitude)
