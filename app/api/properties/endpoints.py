@@ -516,7 +516,7 @@ def unblock_date(
 # ── Photos ────────────────────────────────────────────────────────────────
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 @router.post("/{property_id}/photos", response_model=PropertyPhotoResponse)
@@ -540,7 +540,10 @@ async def upload_photo(
     # Read & validate size
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large. Max 5 MB.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Max {MAX_FILE_SIZE // (1024 * 1024)} MB.",
+        )
 
     # Save file
     upload_dir = os.path.join(settings.PROPERTY_PHOTO_DIR, str(property_id))
