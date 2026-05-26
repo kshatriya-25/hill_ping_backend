@@ -2,15 +2,18 @@
 
 import datetime
 import json
+import os
+import uuid
 from datetime import timezone
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import case, func
 
+from ...core.config import settings
 from ...database.session import getdb
 from ...modals.masters import User
 from ...modals.property import Property, Room, PropertyPhoto, PropertyAmenity, Amenity
@@ -23,13 +26,88 @@ from ...schemas.propertySchema import PropertyListItem
 from ...schemas.reliabilitySchema import ReliabilityScoreResponse
 from ...utils.utils import require_admin
 from ...services.platform_config import get_all_config, set_config, reset_config, DEFAULTS, LIST_KEYS
-from ...services.pricing import room_min_guest_nightly
+from ...services.pricing import (
+    room_min_guest_nightly,
+    room_flat_extras_per_night,
+    calculate_booking_price,
+)
 
 
 class ConfigUpdateBody(BaseModel):
     value: Any
 
 router = APIRouter(tags=["admin"])
+
+
+# ── Helpers for match → booking confirmation ──────────────────────────────────
+
+def _pick_room_for_ping(ping: PingSession, db: Session) -> Room | None:
+    """Room on the ping if present, else cheapest available room that fits the guests."""
+    room = None
+    if ping.room_id:
+        room = db.query(Room).filter(
+            Room.id == ping.room_id, Room.property_id == ping.property_id
+        ).first()
+    if room:
+        return room
+    guest_floor = (
+        Room.price_weekday
+        + func.coalesce(Room.mediator_commission, 0)
+        + func.coalesce(Room.platform_fee, 0)
+    )
+    return (
+        db.query(Room)
+        .filter(
+            Room.property_id == ping.property_id,
+            Room.capacity >= ping.guests_count,
+            Room.is_available == True,
+        )
+        .order_by(guest_floor.asc())
+        .first()
+    )
+
+
+def _suggested_split_for_ping(ping: PingSession, db: Session) -> dict | None:
+    """
+    Pre-fill suggestion for a manual booking's fee split, derived from the room.
+      hotel_fee     = owner rack subtotal (price the owner keeps)
+      mediator_fee  = per-night mediator commission x nights
+      platform_fee  = per-night platform fee x nights + percentage service fee
+    The three always sum to total_amount.
+    """
+    room = _pick_room_for_ping(ping, db)
+    if not room:
+        return None
+    try:
+        prop = db.query(Property).filter(Property.id == ping.property_id).first()
+        pricing = calculate_booking_price(
+            room,
+            ping.check_in,
+            ping.check_out,
+            commission_override=prop.commission_override if prop else None,
+            commission_type=getattr(prop, "commission_type", None) or "percentage",
+        )
+    except ValueError:
+        return None
+
+    nights = pricing["nights"]
+    mc = getattr(room, "mediator_commission", None)
+    pf = getattr(room, "platform_fee", None)
+    mediator_fee = (Decimal(str(mc)) if mc is not None else Decimal("0")) * nights
+    platform_per_night = (Decimal(str(pf)) if pf is not None else Decimal("0")) * nights
+    platform_fee = platform_per_night + Decimal(str(pricing["service_fee"]))
+    total = Decimal(str(pricing["total_amount"]))
+    hotel_fee = (total - mediator_fee - platform_fee).quantize(Decimal("0.01"))
+
+    return {
+        "room_id": room.id,
+        "room_name": room.name,
+        "nights": nights,
+        "hotel_fee": float(hotel_fee),
+        "mediator_fee": float(mediator_fee),
+        "platform_fee": float(platform_fee),
+        "total_amount": float(total),
+    }
 
 
 # ── Dashboard overview ────────────────────────────────────────────────────────
@@ -82,6 +160,11 @@ def dashboard_overview(
         MediatorCommission.status.in_(["pending", "approved", "paid"]),
     ).scalar() or Decimal("0")
 
+    # Recorded fee split across bookings (hotel / mediator / platform)
+    fee_hotel = db.query(func.sum(Booking.hotel_fee)).scalar() or Decimal("0")
+    fee_mediator = db.query(func.sum(Booking.mediator_fee)).scalar() or Decimal("0")
+    fee_platform = db.query(func.sum(Booking.platform_fee)).scalar() or Decimal("0")
+
     return {
         "properties": {
             "total": total_properties,
@@ -103,6 +186,11 @@ def dashboard_overview(
             "gross": float(gross_revenue),
             "platform_commission": float(platform_commission),
             "pending_payouts": float(pending_payouts),
+        },
+        "fee_breakdown": {
+            "hotel": float(fee_hotel),
+            "mediator": float(fee_mediator),
+            "platform": float(fee_platform),
         },
         "reviews": {
             "total": total_reviews,
@@ -472,6 +560,167 @@ def admin_create_booking_from_ping(
     }
 
 
+_PROOF_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
+_PROOF_MAX_SIZE = 15 * 1024 * 1024  # 15 MB
+
+
+@router.post("/bookings/confirm-from-match")
+async def admin_confirm_booking_from_match(
+    session_id: str = Form(..., description="Accepted ping session_id (the match)"),
+    hotel_fee: float = Form(..., ge=0, description="Owner / room portion"),
+    mediator_fee: float = Form(default=0, ge=0, description="Mediator commission"),
+    platform_fee: float = Form(default=0, ge=0, description="HillPing platform cut"),
+    payment_mode: str = Form(default="offline"),
+    payment_reference: str = Form(default=None, description="UPI / bank txn reference"),
+    proof: UploadFile = File(default=None, description="Payment screenshot / receipt"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Confirm a booking from an accepted mediator match, recording the fee split
+    (hotel / mediator / platform), an optional payment proof and reference.
+
+    The booking is created as confirmed + captured so it counts toward GMV and
+    booking totals. If a mediator is on the match and mediator_fee > 0, an
+    approved commission is credited to that mediator.
+    """
+    from ...modals.mediator_commission import MediatorCommission
+    from ...modals.mediator import MediatorProfile
+
+    ping = db.query(PingSession).filter(PingSession.session_id == session_id).first()
+    if not ping:
+        raise HTTPException(status_code=404, detail="Match (ping session) not found")
+    if ping.status != "accepted":
+        raise HTTPException(status_code=400, detail="Match is not in accepted state")
+
+    # One booking per match
+    existing = db.query(Booking).filter(Booking.ping_session_id == ping.id).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This match is already booked ({existing.booking_ref})",
+        )
+
+    room = _pick_room_for_ping(ping, db)
+    if not room:
+        raise HTTPException(status_code=400, detail="No suitable room available for this property")
+
+    nights = (ping.check_out - ping.check_in).days
+    if nights <= 0:
+        raise HTTPException(status_code=400, detail="Invalid stay dates on the match")
+
+    hotel_d = Decimal(str(hotel_fee))
+    mediator_d = Decimal(str(mediator_fee))
+    platform_d = Decimal(str(platform_fee))
+    total_d = (hotel_d + mediator_d + platform_d).quantize(Decimal("0.01"))
+    if total_d <= 0:
+        raise HTTPException(status_code=400, detail="Total amount must be greater than zero")
+
+    # Save payment proof if provided
+    proof_url = None
+    if proof is not None and proof.filename:
+        ext = os.path.splitext(proof.filename)[1].lower()
+        if ext not in _PROOF_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Proof type '{ext}' not allowed. Use: {', '.join(sorted(_PROOF_EXTENSIONS))}",
+            )
+        content = await proof.read()
+        if len(content) > _PROOF_MAX_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Proof too large. Max {_PROOF_MAX_SIZE // (1024 * 1024)} MB.",
+            )
+        os.makedirs(settings.PAYMENT_PROOF_DIR, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{ext}"
+        with open(os.path.join(settings.PAYMENT_PROOF_DIR, filename), "wb") as f:
+            f.write(content)
+        proof_url = f"/uploads/payment_proofs/{filename}"
+
+    booking_ref = f"HP-{uuid.uuid4().hex[:6].upper()}"
+    booking = Booking(
+        booking_ref=booking_ref,
+        property_id=ping.property_id,
+        room_id=room.id,
+        guest_id=ping.guest_id,
+        owner_id=ping.owner_id,
+        mediator_id=ping.mediator_id,
+        ping_session_id=ping.id,
+        check_in=ping.check_in,
+        check_out=ping.check_out,
+        guests_count=ping.guests_count,
+        nights=nights,
+        base_amount=hotel_d,
+        discount_amount=0,
+        service_fee=platform_d,
+        total_amount=total_d,
+        hotel_fee=hotel_d,
+        mediator_fee=mediator_d,
+        platform_fee=platform_d,
+        payment_proof_url=proof_url,
+        payment_reference=payment_reference,
+        status="confirmed",
+        payment_mode=payment_mode,
+        payment_status="captured",
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+
+    # Credit mediator commission (approved) when applicable
+    commission_credited = 0.0
+    if booking.mediator_id and mediator_d > 0:
+        rate = round(float(mediator_d) / max(float(total_d), 1) * 100, 2)
+        db.add(MediatorCommission(
+            mediator_id=booking.mediator_id,
+            booking_id=booking.id,
+            guest_id=booking.guest_id,
+            commission_type="booking",
+            booking_amount=total_d,
+            commission_rate=rate,
+            commission_amount=mediator_d,
+            status="approved",
+            payout_date=datetime.datetime.now(timezone.utc),
+        ))
+        profile = db.query(MediatorProfile).filter(
+            MediatorProfile.user_id == booking.mediator_id
+        ).first()
+        if profile:
+            profile.total_earnings += mediator_d
+            profile.wallet_balance += mediator_d
+            profile.total_bookings += 1
+        db.commit()
+        commission_credited = float(mediator_d)
+
+        from ...services.notifications import send_push_to_user
+        prop = db.query(Property).filter(Property.id == booking.property_id).first()
+        send_push_to_user(
+            user_id=booking.mediator_id,
+            title="Commission Credited!",
+            body=f"₹{commission_credited} earned for booking at {prop.name if prop else 'a property'}",
+            data={
+                "type": "earnings_credited",
+                "amount": str(commission_credited),
+                "booking_id": str(booking.id),
+                "property_name": prop.name if prop else "",
+            },
+            db=db,
+        )
+
+    return {
+        "detail": "Booking confirmed from match",
+        "booking_id": booking.id,
+        "booking_ref": booking.booking_ref,
+        "total_amount": float(booking.total_amount),
+        "hotel_fee": float(hotel_d),
+        "mediator_fee": float(mediator_d),
+        "platform_fee": float(platform_d),
+        "payment_proof_url": proof_url,
+        "commission_credited": commission_credited,
+        "status": booking.status,
+    }
+
+
 # ── Booking overview ──────────────────────────────────────────────────────────
 
 @router.get("/bookings")
@@ -522,6 +771,11 @@ def admin_list_bookings(
             "check_in": str(b.check_in),
             "check_out": str(b.check_out),
             "total_amount": float(b.total_amount),
+            "hotel_fee": float(b.hotel_fee) if b.hotel_fee is not None else None,
+            "mediator_fee": float(b.mediator_fee) if b.mediator_fee is not None else None,
+            "platform_fee": float(b.platform_fee) if b.platform_fee is not None else None,
+            "payment_proof_url": b.payment_proof_url,
+            "payment_reference": b.payment_reference,
             "status": b.status,
             "payment_status": b.payment_status,
             "payment_mode": b.payment_mode,
@@ -1256,6 +1510,9 @@ def admin_mediator_matches(
 
         g_name, g_phone = effective_guest_name_phone_for_mediator_ping(p, guest)
 
+        # Has this match already been turned into a booking?
+        existing_booking = db.query(Booking).filter(Booking.ping_session_id == p.id).first()
+
         result.append({
             "id": p.id,
             "session_id": p.session_id,
@@ -1278,6 +1535,13 @@ def admin_mediator_matches(
             "response_time_seconds": p.owner_response_time,
             "created_at": p.created_at.isoformat() if p.created_at else None,
             "responded_at": p.responded_at.isoformat() if p.responded_at else None,
+            "suggested": _suggested_split_for_ping(p, db),
+            "booking": {
+                "id": existing_booking.id,
+                "booking_ref": existing_booking.booking_ref,
+                "status": existing_booking.status,
+                "total_amount": float(existing_booking.total_amount),
+            } if existing_booking else None,
         })
 
     return {"total": total, "matches": result, "has_more": (skip + limit) < total}

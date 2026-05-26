@@ -104,6 +104,7 @@ class Settings:
 
     # ── Upload directories (extended) ─────────────────────────────────────────
     PROPERTY_PHOTO_DIR: str = os.path.join(UPLOAD_BASE_DIR, "property_photos")
+    PAYMENT_PROOF_DIR: str = os.path.join(UPLOAD_BASE_DIR, "payment_proofs")
 
 
 settings = Settings()
