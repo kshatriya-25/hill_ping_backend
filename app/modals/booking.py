@@ -41,7 +41,8 @@ class Booking(Base):
     hotel_fee = Column(Numeric(10, 2), nullable=True)        # owner's portion (room/stay)
     mediator_fee = Column(Numeric(10, 2), nullable=True)     # mediator commission
     platform_fee = Column(Numeric(10, 2), nullable=True)     # HillPing platform cut
-    payment_proof_url = Column(String(255), nullable=True)   # uploaded screenshot/receipt
+    payment_proof_url = Column(String(255), nullable=True)   # first uploaded screenshot/receipt (back-compat)
+    payment_proof_urls = Column(Text, nullable=True)         # JSON array of all uploaded proof URLs
     payment_reference = Column(String(120), nullable=True)   # UPI / bank txn reference
 
     coupon_id = Column(Integer, nullable=True)  # FK added when coupon model exists

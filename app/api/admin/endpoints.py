@@ -55,16 +55,24 @@ def _pick_room_for_ping(ping: PingSession, db: Session) -> Room | None:
         + func.coalesce(Room.mediator_commission, 0)
         + func.coalesce(Room.platform_fee, 0)
     )
-    return (
+    base = (
         db.query(Room)
-        .filter(
-            Room.property_id == ping.property_id,
-            Room.capacity >= ping.guests_count,
-            Room.is_available == True,
-        )
+        .filter(Room.property_id == ping.property_id)
         .order_by(guest_floor.asc())
-        .first()
     )
+    # Prefer a room that fits the guests and is available...
+    room = base.filter(
+        Room.capacity >= ping.guests_count, Room.is_available == True
+    ).first()
+    if room:
+        return room
+    # ...else any available room...
+    room = base.filter(Room.is_available == True).first()
+    if room:
+        return room
+    # ...else any room at all — an admin manually confirming an offline deal
+    # may combine rooms or take extra guests; don't block the confirmation.
+    return base.first()
 
 
 def _suggested_split_for_ping(ping: PingSession, db: Session) -> dict | None:
@@ -522,7 +530,7 @@ def admin_create_booking_from_ping(
     booking = Booking(
         booking_ref=booking_ref,
         property_id=ping.property_id,
-        room_id=room.id,
+        room_id=room.id if room else None,
         guest_id=ping.guest_id,
         owner_id=ping.owner_id,
         mediator_id=ping.mediator_id,
@@ -572,7 +580,7 @@ async def admin_confirm_booking_from_match(
     platform_fee: float = Form(default=0, ge=0, description="HillPing platform cut"),
     payment_mode: str = Form(default="offline"),
     payment_reference: str = Form(default=None, description="UPI / bank txn reference"),
-    proof: UploadFile = File(default=None, description="Payment screenshot / receipt"),
+    proofs: list[UploadFile] = File(default=None, description="Payment screenshots / receipts (one or many)"),
     db: Session = Depends(getdb),
     _admin: User = Depends(require_admin),
 ):
@@ -601,9 +609,10 @@ async def admin_confirm_booking_from_match(
             detail=f"This match is already booked ({existing.booking_ref})",
         )
 
+    # Best-effort room for the booking. An admin confirming an offline/founder-led
+    # deal shouldn't be blocked by room capacity/availability — proceed even if the
+    # property has no matching (or no) rooms (room_id stays null in that case).
     room = _pick_room_for_ping(ping, db)
-    if not room:
-        raise HTTPException(status_code=400, detail="No suitable room available for this property")
 
     nights = (ping.check_out - ping.check_in).days
     if nights <= 0:
@@ -616,9 +625,11 @@ async def admin_confirm_booking_from_match(
     if total_d <= 0:
         raise HTTPException(status_code=400, detail="Total amount must be greater than zero")
 
-    # Save payment proof if provided
-    proof_url = None
-    if proof is not None and proof.filename:
+    # Save payment proof(s) if provided — supports one or many receipts
+    proof_urls = []
+    for proof in (proofs or []):
+        if proof is None or not proof.filename:
+            continue
         ext = os.path.splitext(proof.filename)[1].lower()
         if ext not in _PROOF_EXTENSIONS:
             raise HTTPException(
@@ -629,19 +640,21 @@ async def admin_confirm_booking_from_match(
         if len(content) > _PROOF_MAX_SIZE:
             raise HTTPException(
                 status_code=400,
-                detail=f"Proof too large. Max {_PROOF_MAX_SIZE // (1024 * 1024)} MB.",
+                detail=f"\"{proof.filename}\" too large. Max {_PROOF_MAX_SIZE // (1024 * 1024)} MB per file.",
             )
         os.makedirs(settings.PAYMENT_PROOF_DIR, exist_ok=True)
         filename = f"{uuid.uuid4().hex}{ext}"
         with open(os.path.join(settings.PAYMENT_PROOF_DIR, filename), "wb") as f:
             f.write(content)
-        proof_url = f"/uploads/payment_proofs/{filename}"
+        proof_urls.append(f"/uploads/payment_proofs/{filename}")
+
+    proof_url = proof_urls[0] if proof_urls else None  # back-compat single field
 
     booking_ref = f"HP-{uuid.uuid4().hex[:6].upper()}"
     booking = Booking(
         booking_ref=booking_ref,
         property_id=ping.property_id,
-        room_id=room.id,
+        room_id=room.id if room else None,
         guest_id=ping.guest_id,
         owner_id=ping.owner_id,
         mediator_id=ping.mediator_id,
@@ -658,6 +671,7 @@ async def admin_confirm_booking_from_match(
         mediator_fee=mediator_d,
         platform_fee=platform_d,
         payment_proof_url=proof_url,
+        payment_proof_urls=json.dumps(proof_urls) if proof_urls else None,
         payment_reference=payment_reference,
         status="confirmed",
         payment_mode=payment_mode,
@@ -716,6 +730,7 @@ async def admin_confirm_booking_from_match(
         "mediator_fee": float(mediator_d),
         "platform_fee": float(platform_d),
         "payment_proof_url": proof_url,
+        "payment_proof_urls": proof_urls,
         "commission_credited": commission_credited,
         "status": booking.status,
     }
@@ -775,6 +790,11 @@ def admin_list_bookings(
             "mediator_fee": float(b.mediator_fee) if b.mediator_fee is not None else None,
             "platform_fee": float(b.platform_fee) if b.platform_fee is not None else None,
             "payment_proof_url": b.payment_proof_url,
+            "payment_proof_urls": (
+                json.loads(b.payment_proof_urls)
+                if b.payment_proof_urls
+                else ([b.payment_proof_url] if b.payment_proof_url else [])
+            ),
             "payment_reference": b.payment_reference,
             "status": b.status,
             "payment_status": b.payment_status,
