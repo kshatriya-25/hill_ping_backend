@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import logging
 import os
 import uuid
 from datetime import timezone
@@ -35,6 +36,8 @@ from ...services.pricing import (
 
 class ConfigUpdateBody(BaseModel):
     value: Any
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["admin"])
 
@@ -732,6 +735,185 @@ async def admin_confirm_booking_from_match(
         "payment_proof_url": proof_url,
         "payment_proof_urls": proof_urls,
         "commission_credited": commission_credited,
+        "status": booking.status,
+    }
+
+
+@router.patch("/bookings/{booking_id}/update-from-match")
+async def admin_update_booking_from_match(
+    booking_id: int,
+    hotel_fee: float | None = Form(default=None, ge=0),
+    mediator_fee: float | None = Form(default=None, ge=0),
+    platform_fee: float | None = Form(default=None, ge=0),
+    payment_mode: str | None = Form(default=None),
+    payment_reference: str | None = Form(default=None),
+    delete_proof_urls: str | None = Form(
+        default=None,
+        description="JSON array of proof URLs to remove from this booking",
+    ),
+    proofs: list[UploadFile] = File(default=None, description="Additional proofs to append"),
+    db: Session = Depends(getdb),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Update a previously-confirmed match booking: edit the fee split, swap
+    payment details, and add/remove proof receipts.
+
+    Reconciles the mediator's commission and wallet balance by the *delta*
+    between old and new mediator_fee. Always applies (even if commission
+    was already paid or owner payout processed) — admin is trusted here.
+    """
+    from ...modals.mediator_commission import MediatorCommission
+    from ...modals.mediator import MediatorProfile
+
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    # ── Fee split: keep prior value when field omitted ────────────────────────
+    old_hotel = Decimal(str(booking.hotel_fee or 0))
+    old_mediator = Decimal(str(booking.mediator_fee or 0))
+    old_platform = Decimal(str(booking.platform_fee or 0))
+
+    new_hotel = Decimal(str(hotel_fee)) if hotel_fee is not None else old_hotel
+    new_mediator = Decimal(str(mediator_fee)) if mediator_fee is not None else old_mediator
+    new_platform = Decimal(str(platform_fee)) if platform_fee is not None else old_platform
+    new_total = (new_hotel + new_mediator + new_platform).quantize(Decimal("0.01"))
+    if new_total <= 0:
+        raise HTTPException(status_code=400, detail="Total amount must be greater than zero")
+
+    # ── Proofs: load existing, remove requested, append new ───────────────────
+    existing_urls: list[str] = []
+    if booking.payment_proof_urls:
+        try:
+            existing_urls = list(json.loads(booking.payment_proof_urls))
+        except (ValueError, TypeError):
+            existing_urls = []
+    elif booking.payment_proof_url:
+        existing_urls = [booking.payment_proof_url]
+
+    to_delete: set[str] = set()
+    if delete_proof_urls:
+        try:
+            to_delete = {u for u in json.loads(delete_proof_urls) if isinstance(u, str)}
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="delete_proof_urls must be a JSON array of strings")
+
+    kept_urls = [u for u in existing_urls if u not in to_delete]
+
+    # Best-effort unlink files for proofs the admin asked to delete
+    for url in to_delete:
+        if url and url.startswith("/uploads/payment_proofs/"):
+            path = os.path.join(settings.UPLOAD_BASE_DIR, url.removeprefix("/uploads/"))
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                logger.warning("Could not delete proof file %s", path)
+
+    # Append new uploads
+    appended_urls: list[str] = []
+    for proof in (proofs or []):
+        if proof is None or not proof.filename:
+            continue
+        ext = os.path.splitext(proof.filename)[1].lower()
+        if ext not in _PROOF_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Proof type '{ext}' not allowed. Use: {', '.join(sorted(_PROOF_EXTENSIONS))}",
+            )
+        content = await proof.read()
+        if len(content) > _PROOF_MAX_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"\"{proof.filename}\" too large. Max {_PROOF_MAX_SIZE // (1024 * 1024)} MB per file.",
+            )
+        os.makedirs(settings.PAYMENT_PROOF_DIR, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{ext}"
+        with open(os.path.join(settings.PAYMENT_PROOF_DIR, filename), "wb") as f:
+            f.write(content)
+        appended_urls.append(f"/uploads/payment_proofs/{filename}")
+
+    final_urls = kept_urls + appended_urls
+
+    # ── Persist booking changes ───────────────────────────────────────────────
+    booking.hotel_fee = new_hotel
+    booking.mediator_fee = new_mediator
+    booking.platform_fee = new_platform
+    booking.base_amount = new_hotel
+    booking.service_fee = new_platform
+    booking.total_amount = new_total
+    booking.payment_proof_urls = json.dumps(final_urls) if final_urls else None
+    booking.payment_proof_url = final_urls[0] if final_urls else None
+    if payment_mode is not None:
+        booking.payment_mode = payment_mode
+    if payment_reference is not None:
+        booking.payment_reference = payment_reference or None
+
+    # ── Reconcile mediator commission by delta ────────────────────────────────
+    mediator_delta = (new_mediator - old_mediator).quantize(Decimal("0.01"))
+    commission_status = None
+    if booking.mediator_id:
+        existing_comm = db.query(MediatorCommission).filter(
+            MediatorCommission.booking_id == booking.id,
+            MediatorCommission.commission_type == "booking",
+        ).first()
+
+        if existing_comm:
+            rate = round(float(new_mediator) / max(float(new_total), 1) * 100, 2)
+            existing_comm.booking_amount = new_total
+            existing_comm.commission_amount = new_mediator
+            existing_comm.commission_rate = rate
+            commission_status = existing_comm.status
+        elif new_mediator > 0:
+            rate = round(float(new_mediator) / max(float(new_total), 1) * 100, 2)
+            db.add(MediatorCommission(
+                mediator_id=booking.mediator_id,
+                booking_id=booking.id,
+                guest_id=booking.guest_id,
+                commission_type="booking",
+                booking_amount=new_total,
+                commission_rate=rate,
+                commission_amount=new_mediator,
+                status="approved",
+                payout_date=datetime.datetime.now(timezone.utc),
+            ))
+            commission_status = "approved"
+
+        # Adjust mediator profile wallet & totals by the delta
+        if mediator_delta != 0:
+            profile = db.query(MediatorProfile).filter(
+                MediatorProfile.user_id == booking.mediator_id
+            ).first()
+            if profile:
+                profile.total_earnings = (profile.total_earnings or Decimal("0")) + mediator_delta
+                profile.wallet_balance = (profile.wallet_balance or Decimal("0")) + mediator_delta
+
+    db.commit()
+    db.refresh(booking)
+
+    logger.info(
+        "admin_update_booking_from_match booking_id=%s ref=%s "
+        "hotel=%s->%s mediator=%s->%s platform=%s->%s "
+        "proofs_deleted=%d proofs_added=%d commission_status=%s",
+        booking.id, booking.booking_ref,
+        old_hotel, new_hotel, old_mediator, new_mediator, old_platform, new_platform,
+        len(to_delete & set(existing_urls)), len(appended_urls), commission_status,
+    )
+
+    return {
+        "detail": "Booking updated",
+        "booking_id": booking.id,
+        "booking_ref": booking.booking_ref,
+        "total_amount": float(booking.total_amount),
+        "hotel_fee": float(new_hotel),
+        "mediator_fee": float(new_mediator),
+        "platform_fee": float(new_platform),
+        "payment_mode": booking.payment_mode,
+        "payment_reference": booking.payment_reference,
+        "payment_proof_urls": final_urls,
+        "mediator_delta": float(mediator_delta),
+        "commission_status": commission_status,
         "status": booking.status,
     }
 
@@ -1556,12 +1738,22 @@ def admin_mediator_matches(
             "created_at": p.created_at.isoformat() if p.created_at else None,
             "responded_at": p.responded_at.isoformat() if p.responded_at else None,
             "suggested": _suggested_split_for_ping(p, db),
-            "booking": {
+            "booking": ({
                 "id": existing_booking.id,
                 "booking_ref": existing_booking.booking_ref,
                 "status": existing_booking.status,
                 "total_amount": float(existing_booking.total_amount),
-            } if existing_booking else None,
+                "hotel_fee": float(existing_booking.hotel_fee) if existing_booking.hotel_fee is not None else None,
+                "mediator_fee": float(existing_booking.mediator_fee) if existing_booking.mediator_fee is not None else None,
+                "platform_fee": float(existing_booking.platform_fee) if existing_booking.platform_fee is not None else None,
+                "payment_mode": existing_booking.payment_mode,
+                "payment_reference": existing_booking.payment_reference,
+                "payment_proof_urls": (
+                    json.loads(existing_booking.payment_proof_urls)
+                    if existing_booking.payment_proof_urls
+                    else ([existing_booking.payment_proof_url] if existing_booking.payment_proof_url else [])
+                ),
+            }) if existing_booking else None,
         })
 
     return {"total": total, "matches": result, "has_more": (skip + limit) < total}
